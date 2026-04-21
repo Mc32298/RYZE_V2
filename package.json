@@ -1,0 +1,63 @@
+{
+  "name": "RYZE",
+  "version": "1.1.4-beta-1",
+  "description": "The Private Inbox Command Center",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Mc32298/RYZE.git"
+  },
+  "main": "src/main/main.js",
+  "scripts": {
+    "postinstall": "electron-builder install-app-deps",
+    "start": "electron .",
+    "dist": "electron-builder --windows"
+  },
+  "author": "Mathias N",
+  "license": "ISC",
+  "build": {
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Mc32298",
+        "repo": "RYZE"
+      }
+    ],
+    "appId": "com.ryze.mail",
+    "productName": "RYZE",
+    "copyright": "Copyright © 2026",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "src/assets/logo.ico"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^41.2.1",
+    "electron-builder": "^26.8.1"
+  },
+  "dependencies": {
+    "axios": "^1.15.2",
+    "better-sqlite3": "^12.9.0",
+    "dompurify": "^3.4.0",
+    "electron-updater": "^6.8.3",
+    "electron-window-state": "^5.0.3",
+    "imapflow": "^1.3.2",
+    "mailparser": "^3.9.8",
+    "nodemailer": "^8.0.5"
+  }
+}

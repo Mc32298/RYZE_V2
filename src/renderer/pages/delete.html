@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+  <!-- ======================================================================
+       STYLES
+       ====================================================================== -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,300,0,0" />
+  <style>
+
+    /* ==========================================================================
+       BASE
+       ========================================================================== */
+
+    body { 
+      background: transparent !important;
+      color: white; 
+      font-family: -apple-system, sans-serif; 
+      display: flex; 
+      justify-content: center; 
+      align-items: center; 
+      height: 100vh; 
+      margin: 0; 
+      overflow: hidden; 
+    }
+
+    /* ==========================================================================
+       FAKE SHADOW WRAPPER
+       ========================================================================== */
+
+    .wrapper {
+      position: relative;
+      padding: 30px;
+    }
+
+    .wrapper::before {
+      content: '';
+      position: absolute;
+      inset: 25px;
+      border-radius: 24px;
+      background: rgba(0, 0, 0, 0.5);
+      filter: blur(12px);
+      z-index: -1;
+    }
+
+    /* ==========================================================================
+       MODAL
+       ========================================================================== */
+
+    .modal-content { 
+      background-color: #2c2c2e;
+      padding: 30px; 
+      border-radius: 20px; 
+      width: 300px; 
+      text-align: center; 
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      position: relative;
+      z-index: 1;
+    }
+
+    .modal-icon { 
+      font-size: 48px !important; 
+      color: #ff5f56; 
+      margin-bottom: 15px; 
+    }
+
+    h3 { 
+      margin: 0 0 10px 0; 
+      font-weight: 500; 
+    }
+
+    p { 
+      color: #a1a1a6; 
+      margin-bottom: 25px; 
+      font-size: 14px; 
+    }
+
+    /* ==========================================================================
+       BUTTONS
+       ========================================================================== */
+
+    .modal-actions { 
+      display: flex; 
+      gap: 12px; 
+    }
+
+    button { 
+      flex: 1; 
+      padding: 12px; 
+      border: none; 
+      border-radius: 12px; 
+      cursor: pointer; 
+      font-weight: 600; 
+      transition: 0.2s; 
+    }
+
+    #cancel-btn         { background: rgba(255, 255, 255, 0.1); color: white; }
+    #confirm-btn        { background: #ff5f56; color: white; }
+    #confirm-btn:hover  { background: #e04e45; }
+
+  </style>
+</head>
+<body>
+
+  <!-- ======================================================================
+       MODAL
+       ====================================================================== -->
+  <div class="wrapper">
+    <div class="modal-content">
+      <span class="material-symbols-outlined modal-icon">delete_forever</span>
+      <h3>Remove Inbox?</h3>
+      <p>Are you sure you want to remove <span id="acc-name" style="color: #0A84FF;"></span>?</p>
+      <div class="modal-actions">
+        <button id="cancel-btn">Cancel</button>
+        <button id="confirm-btn">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       SCRIPT
+       ====================================================================== -->
+  <script>
+    // --- Init ---
+    const params = new URLSearchParams(window.location.search);
+    const accId = params.get('id');
+    const accName = params.get('name');
+
+    document.getElementById('acc-name').innerText = accName;
+
+    // --- Actions ---
+    document.getElementById('cancel-btn').onclick = () => window.close();
+    document.getElementById('confirm-btn').onclick = () => {
+      window.mailAPI.deleteAccount(accId);
+      window.close();
+    };
+  </script>
+
+</body>
+</html>

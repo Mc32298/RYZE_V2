@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>RYZE V2</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,300,0,0" />
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+
+  <div class="sidebar">
+    <div class="traffic-lights">
+      <div class="light close"></div>
+      <div class="light minimize"></div>
+      <div class="light maximize"></div>
+    </div>
+    <button id="btn-add" title="Add Inbox">
+      <span class="material-symbols-outlined">add</span>
+    </button>
+    <button id="btn-feedback" title="Feedback & Suggestions">
+      <span class="material-symbols-outlined">forum</span>
+    </button>
+  </div>
+
+ <div id="app-container">
+    
+    <div id="email-list">
+      <div class="list-header">Inbox</div>
+      <div id="inbox-items">
+        <p style="color: #666; font-size: 14px; padding: 0 20px;">Loading emails...</p>
+      </div>
+    </div>
+
+    <div id="email-reader">
+      
+      <div class="reader-toolbar-container" id="reader-toolbar">
+        <div class="toolbar-pill">
+          
+          <button id="btn-reply-email" class="mac-icon-btn" title="Reply">
+            <span class="material-symbols-outlined">reply</span>
+          </button>
+          
+          <button id="btn-delete-email" class="mac-icon-btn" title="Delete Email" style="display: none; color: #ff5f56;">
+            <span class="material-symbols-outlined">delete</span>
+          </button>
+          <div class="pill-divider" id="pill-divider-main"></div>
+
+          <select id="format-font" class="mac-select compose-only" style="display: none;">
+            <option value="Arial, sans-serif">Arial</option>
+            <option value="Georgia, serif">Georgia</option>
+            <option value="Courier New, monospace">Courier</option>
+            <option value="Times New Roman, serif">Times</option>
+          </select>
+
+          <select id="format-size" class="mac-select compose-only" style="display: none;">
+            <option value="1">Small</option>
+            <option value="3" selected>Normal</option>
+            <option value="5">Large</option>
+            <option value="7">Huge</option>
+          </select>
+
+          <div class="pill-divider compose-only" style="display: none;"></div>
+
+          <button id="format-bold" class="mac-icon-btn compose-only" title="Bold" style="display: none;">
+            <span class="material-symbols-outlined">format_bold</span>
+          </button>
+          <button id="format-italic" class="mac-icon-btn compose-only" title="Italic" style="display: none;">
+            <span class="material-symbols-outlined">format_italic</span>
+          </button>
+          <button id="format-underline" class="mac-icon-btn compose-only" title="Underline" style="display: none;">
+            <span class="material-symbols-outlined">format_underlined</span>
+          </button>
+          <button id="format-highlight" class="mac-icon-btn compose-only" title="Highlight" style="display: none;">
+            <span class="material-symbols-outlined">format_ink_highlighter</span>
+          </button>
+          
+          <div class="pill-divider compose-only" style="display: none;"></div>
+
+          <button id="toggle-important" class="mac-icon-btn compose-only" title="Mark as Important" style="display: none;">
+            <span class="material-symbols-outlined">priority_high</span>
+          </button>
+
+          <div class="pill-divider compose-only" style="display: none;"></div>
+
+          <button id="pill-btn-cancel" class="mac-icon-btn compose-only" title="Discard" style="display: none;">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+          <button id="pill-btn-send" class="mac-pill-primary compose-only" title="Send Email" style="display: none;">
+            <span class="material-symbols-outlined" style="font-size: 16px !important; margin-right: 4px;">send</span> Send
+          </button>
+          
+          <div class="pill-divider compose-only" style="display: none;"></div>
+
+          <button id="btn-toggle-calendar" class="mac-icon-btn" title="Toggle Calendar">
+            <span class="material-symbols-outlined">calendar_month</span>
+          </button>
+
+        </div>
+      </div>
+
+      <div class="reader-content" id="reader-view">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <h1 id="reader-subject">Select an email</h1>
+            <p id="reader-sender">---</p>
+          </div>
+        </div>
+        <div id="reader-body"></div>
+      </div>
+
+      <div id="inline-compose" style="display: none;">
+        <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;">
+          <input type="email" id="inline-to" placeholder="To:" class="inline-input">
+          <input type="text" id="inline-subject" placeholder="Subject:" class="inline-input">
+        </div>
+        <div id="inline-body" contenteditable="true" placeholder="Write your message here..."></div>
+        
+        </div>
+
+    </div>
+
+    <div id="calendar-sidebar" class="sidebar-collapsed">
+      <div class="calendar-header">
+        <span class="material-symbols-outlined" style="font-size: 20px !important; margin-right: 8px; color: var(--accent-color);">event</span>
+        <span id="calendar-account-name">Calendar</span>
+      </div>
+      <div id="calendar-content">
+        <div class="empty-calendar">
+          <span class="material-symbols-outlined">event_busy</span>
+          <p>No account selected</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="https://unpkg.com/dompurify@3.0.8/dist/purify.min.js"></script>
+  <script src="../renderer.js"></script>
+
+</body>
+</html>

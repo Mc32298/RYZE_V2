@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+
+    /* ==========================================================================
+       BASE
+       ========================================================================== */
+
+    body { 
+      background: transparent !important; 
+      color: white; 
+      font-family: -apple-system, sans-serif; 
+      display: flex; 
+      justify-content: center; 
+      align-items: center; 
+      height: 100vh; 
+      margin: 0;
+      overflow: hidden;
+    }
+
+    /* ==========================================================================
+       FAKE SHADOW WRAPPER
+       ========================================================================== */
+
+    .wrapper {
+      position: relative;
+      padding: 30px;
+    }
+
+    .wrapper::before {
+      content: '';
+      position: absolute;
+      inset: 25px;
+      border-radius: 28px;
+      background: rgba(0, 0, 0, 0.5);
+      filter: blur(12px);
+      z-index: -1;
+    }
+
+    /* ==========================================================================
+       MODAL
+       ========================================================================== */
+
+    .modal-box { 
+      background: #1c1c1e; 
+      padding: 35px; 
+      border-radius: 24px; 
+      border: 1px solid rgba(255, 255, 255, 0.1); 
+      text-align: center; 
+      width: 300px;
+      position: relative;
+      z-index: 1;
+    }
+
+    h2 { 
+      font-weight: 500; 
+      margin-bottom: 20px; 
+      font-size: 20px; 
+    }
+
+    input { 
+      width: 100%; 
+      background: #2c2c2e; 
+      border: 1px solid #3a3a3c; 
+      border-radius: 10px; 
+      padding: 12px; 
+      color: white; 
+      font-size: 16px; 
+      margin-bottom: 20px; 
+      box-sizing: border-box; 
+      outline: none; 
+    }
+
+    input:focus { 
+      border-color: #0A84FF; 
+    }
+
+    button { 
+      background: #0A84FF; 
+      border: none; 
+      width: 100%; 
+      color: white; 
+      padding: 14px; 
+      border-radius: 12px; 
+      cursor: pointer; 
+      font-weight: 700; 
+    }
+
+    .cancel {
+      margin-top: 20px; 
+      font-size: 12px; 
+      color: #666; 
+      cursor: pointer;
+    }
+
+  </style>
+</head>
+<body>
+
+  <div class="wrapper">
+    <div class="modal-box">
+      <h2>Rename Inbox</h2>
+      <input type="text" id="new-name" maxlength="12">
+      <button onclick="save()">Save Name</button>
+      <div class="cancel" onclick="window.close()">Cancel</div>
+    </div>
+  </div>
+
+  <script>
+    // --- Init ---
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get('id');
+    const input = document.getElementById('new-name');
+
+    input.value = decodeURIComponent(params.get('name'));
+    input.focus();
+
+    // --- Save ---
+    function save() {
+      window.mailAPI.updateAccountName({ id, newName: input.value });
+      window.close();
+    }
+  </script>
+
+</body>
+</html>
