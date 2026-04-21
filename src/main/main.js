@@ -1,4 +1,5 @@
 // src/main/main.js
+require('dotenv').config(); 
 const { app, BrowserWindow, session, shell, ipcMain, Menu, MenuItem, safeStorage } = require('electron');
 const path = require('path');
 const nodemailer = require('nodemailer');
@@ -61,8 +62,8 @@ const axios = require('axios'); // Add this at the top of main.js
 
 // YOUR MICROSOFT KEYS (From Azure Portal)
 const MS_CONFIG = {
-  clientId: 'b32a0e59-d61f-4655-981c-a18266e0af4f',
-  clientSecret: 'lyQ8Q~CridH2pYQSsDRKRVnSHusTXlkdk-djGak0',
+  clientId: process.env.AZURE_CLIENT_ID,
+  clientSecret: process.env.AZURE_CLIENT_SECRET,
   authority: 'https://login.microsoftonline.com/common/oauth2/v2.0',
   redirectUri: 'http://localhost'
 };
