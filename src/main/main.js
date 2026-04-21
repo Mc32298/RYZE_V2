@@ -228,13 +228,23 @@ async function exchangeCodeForTokens(code) {
       refresh_token, 
       Date.now() + (expires_in * 1000)
     );
+    const uiData = { 
+      id: String(accountId), 
+      name: 'Outlook', 
+      icon: 'alternate_email' 
+    };
 
-    mainWindow.webContents.send('new-account', { id: accountId, name: 'Outlook', icon: 'alternate_email' });
+    mainWindow.webContents.send('new-account', { ...uiData });
     initAccountEngine(accountId);
 
   } catch (error) {
-    console.error('OAuth Token Exchange Failed:', error.response?.data || error.message);
-  }
+    // Instead of logging the whole object, log the specific message
+    const errorMsg = error.response?.data ? JSON.stringify(error.response.data) : error.message;
+    console.error('OAuth Token Exchange Failed:', errorMsg);
+    
+    // If you send a message back to the UI, make sure it's just a string
+    mainWindow.webContents.send('oauth-error', "Failed to exchange code for tokens.");
+}
 }
 
 
@@ -263,14 +273,15 @@ ipcMain.handle('get-emails', async (event, accountId) => {
   if (!isTrustedSender(event.sender)) return [];
   try {
     const stmt = db.prepare('SELECT * FROM emails WHERE account_id = ? ORDER BY date DESC');
-    return stmt.all(accountId);
+    const rows = stmt.all(accountId);
+    
+    // Convert to a clean array of objects to ensure it can be cloned
+    return rows.map(row => ({ ...row })); 
   } catch (error) {
-    // 1. Log the full error to the terminal (Main process)
     console.error('Failed to fetch emails:', error);
-    // 2. ONLY return a clean, clonable value to the UI (Renderer)
     return []; 
   }
-});
+})
 
 ipcMain.on('add-service', async (event, data) => {
   if (!isTrustedSender(event.sender)) return; 
@@ -409,7 +420,7 @@ ipcMain.handle('send-email', async (event, { accountId, to, subject, body, prior
     console.log(`Email sent successfully from ${acc.email}`);
     return true;
   } catch (error) {
-    console.error('SMTP Error:', error.message);
+    return { success: false, message: error.message }; // Works: Plain object
     return false;
   }
 });
