@@ -504,11 +504,12 @@ a:link {
   
   /* The Fluid Width Constraints */
   width: 100%;
-  min-width: 300px; /* Prevents text from becoming a single unreadable column if window is tiny */
-  max-width: 850px; /* Optimal readability length (Apple Mail style) */
+  min-width: 300px; 
+  max-width: 850px; 
+  margin: 0 auto; /* <-- ADD THIS LINE to center the email body */
   
   /* The Magic Word Wrapping */
-  overflow-wrap: break-word; /* Forces long links/words to snap to the next line */
+  overflow-wrap: break-word; 
   word-wrap: break-word;
   word-break: break-word;
   white-space: normal;
