@@ -36,6 +36,10 @@
       <div class="reader-toolbar-container" id="reader-toolbar">
         <div class="toolbar-pill">
           
+          <button id="btn-compose" class="mac-icon-btn" title="New Mail">
+            <span class="material-symbols-outlined">edit_square</span>
+          </button>
+
           <button id="btn-reply-email" class="mac-icon-btn" title="Reply">
             <span class="material-symbols-outlined">reply</span>
           </button>
@@ -130,6 +134,37 @@
           <p>No account selected</p>
         </div>
       </div>
+    </div>
+
+  </div>
+
+  <div id="onboarding-overlay" class="onboarding-hidden">
+    
+    <div class="onboarding-card" id="onboarding-card">
+      <span class="material-symbols-outlined logo-icon">mail</span>
+      
+      <div id="step-1">
+        <h2>Welcome to RYZE V2</h2>
+        <p>Your sleek, private, and lightning-fast email client. Let's get your first inbox set up so you can see it in action.</p>
+        <button class="onboarding-btn" onclick="nextOnboardingStep(3)">Let's Go</button>
+      </div>
+
+      <div id="step-delete" style="display: none;">
+        <h2>Awesome!</h2>
+        <p>Your inbox is now syncing locally. If you ever need to remove an account or rename it, just <b>Right-Click</b> its icon on the sidebar.</p>
+        <button class="onboarding-btn" onclick="showFinalThanks()">Got it</button>
+      </div>
+
+      <div id="step-final" style="display: none;">
+        <h2>You're all set!</h2>
+        <p>Enjoy your new inbox experience. You can always add more accounts later using the + button.</p>
+        <button class="onboarding-btn" onclick="closeOnboarding()">Open Inbox</button>
+      </div>
+    </div>
+
+    <div id="onboarding-pointer" class="pointer-hidden">
+      <div class="pointer-arrow"></div>
+      Click here to add your first inbox!
     </div>
 
   </div>

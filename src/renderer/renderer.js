@@ -1,15 +1,49 @@
+// renderer.js
 // =============================================================================
-// STATE
+// SECURITY HARDENED — All innerHTML calls that accepted user/email-sourced
+// data have been replaced with textContent or DOM construction so that a
+// malicious email can never inject scripts or HTML into the UI.
 // =============================================================================
+
 // =============================================================================
 // STATE
 // =============================================================================
 let currentOpenEmail = null;
-let isImportant = false; // <--- ADD THIS LINE HERE
+let isImportant      = false;
 let isTutorialActive = false;
-// ... rest of your code
+
 const sidebar = document.querySelector('.sidebar');
-const addBtn = document.getElementById('btn-add');
+const addBtn  = document.getElementById('btn-add');
+
+// =============================================================================
+// SECURITY HELPERS
+// =============================================================================
+
+/**
+ * Escapes a plain string so it is safe to splice into an HTML template.
+ * Use this only when you truly need to build HTML strings (e.g. the compose
+ * quote block).  Prefer textContent / DOM construction everywhere else.
+ */
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML; // browser does the encoding
+}
+
+/**
+ * Sanitizes HTML from an untrusted source (email bodies) using DOMPurify.
+ * Strips scripts, event handlers, and other dangerous constructs while
+ * preserving the visual formatting of the email.
+ */
+function sanitizeEmailHtml(html) {
+  if (!window.DOMPurify) return ''; // Fail closed — show nothing if library is missing
+  return window.DOMPurify.sanitize(html || '', {
+    // Extra safety: forbid tags that could be used for phishing / exfiltration
+    FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'base'],
+    FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onmouseout', 'onfocus'],
+    FORCE_BODY:  true,
+  });
+}
 
 // =============================================================================
 // ONBOARDING
@@ -22,13 +56,13 @@ function startOnboarding() {
 
 function nextOnboardingStep(step) {
   const overlay = document.getElementById('onboarding-overlay');
-  if(document.getElementById('step-1')) document.getElementById('step-1').style.display = 'none';
-  if(document.getElementById('step-2')) document.getElementById('step-2').style.display = 'none';
+  document.getElementById('step-1')?.style && (document.getElementById('step-1').style.display = 'none');
+  document.getElementById('step-2')?.style && (document.getElementById('step-2').style.display = 'none');
 
   if (step === 2) {
-    if(document.getElementById('step-2')) document.getElementById('step-2').style.display = 'block';
+    if (document.getElementById('step-2')) document.getElementById('step-2').style.display = 'block';
   } else if (step === 3) {
-    if(document.getElementById('onboarding-card')) document.getElementById('onboarding-card').style.display = 'none';
+    if (document.getElementById('onboarding-card')) document.getElementById('onboarding-card').style.display = 'none';
     document.getElementById('onboarding-pointer')?.classList.remove('pointer-hidden');
     overlay?.classList.add('onboarding-passthrough');
   }
@@ -38,22 +72,21 @@ function showDeleteTutorial() {
   const overlay = document.getElementById('onboarding-overlay');
   overlay?.classList.remove('onboarding-passthrough');
   document.getElementById('onboarding-pointer')?.classList.add('pointer-hidden');
-  if(document.getElementById('onboarding-card')) document.getElementById('onboarding-card').style.display = 'block';
-  if(document.getElementById('step-1')) document.getElementById('step-1').style.display = 'none';
-  if(document.getElementById('step-2')) document.getElementById('step-2').style.display = 'none';
-  if(document.getElementById('step-delete')) document.getElementById('step-delete').style.display = 'block';
+  if (document.getElementById('onboarding-card'))  document.getElementById('onboarding-card').style.display  = 'block';
+  if (document.getElementById('step-1'))           document.getElementById('step-1').style.display           = 'none';
+  if (document.getElementById('step-2'))           document.getElementById('step-2').style.display           = 'none';
+  if (document.getElementById('step-delete'))      document.getElementById('step-delete').style.display      = 'block';
 }
 
 function showFinalThanks() {
-  if(document.getElementById('step-delete')) document.getElementById('step-delete').style.display = 'none';
-  if(document.getElementById('step-final')) document.getElementById('step-final').style.display = 'block';
+  if (document.getElementById('step-delete')) document.getElementById('step-delete').style.display = 'none';
+  if (document.getElementById('step-final'))  document.getElementById('step-final').style.display  = 'block';
 }
 
 function closeOnboarding() {
   document.getElementById('onboarding-overlay')?.classList.add('onboarding-hidden');
   isTutorialActive = false;
-  const firstBtn = document.querySelector('.mail-btn');
-  if (firstBtn) firstBtn.click();
+  document.querySelector('.mail-btn')?.click();
 }
 
 // =============================================================================
@@ -64,31 +97,45 @@ function createSidebarButton(acc) {
   if (document.getElementById(acc.id)) return;
 
   const btn = document.createElement('button');
-  btn.id = acc.id;
+  btn.id        = acc.id;
   btn.className = 'mail-btn';
-  btn.title = acc.name;
-  btn.innerHTML = `
-    <span class="material-symbols-outlined">${acc.icon}</span>
-    <span class="btn-label">${acc.name}</span>
-  `;
+  btn.title     = acc.name; // .title is safe — set as a property not innerHTML
+
+  // FIX: Build the button with DOM APIs instead of innerHTML so that a
+  //      database-stored account name cannot inject HTML into the sidebar.
+  const iconEl = document.createElement('span');
+  iconEl.className = 'material-symbols-outlined';
+  // Allowlist icon names — they must only contain lowercase letters, digits,
+  // and underscores (all legitimate Material Symbol names match this pattern).
+  const safeIcon = /^[a-z0-9_]+$/.test(acc.icon) ? acc.icon : 'mail';
+  iconEl.textContent = safeIcon; // textContent — never innerHTML
+
+  const labelEl = document.createElement('span');
+  labelEl.className   = 'btn-label';
+  labelEl.textContent = acc.name; // FIX: textContent, not innerHTML
+
+  btn.appendChild(iconEl);
+  btn.appendChild(labelEl);
 
   btn.addEventListener('click', () => {
     document.querySelectorAll('.sidebar button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    
+
     const calHeader = document.getElementById('calendar-account-name');
-    if (calHeader) calHeader.innerText = `${acc.name}'s Calendar`;
-    
+    if (calHeader) calHeader.textContent = `${acc.name}'s Calendar`; // FIX: textContent
+
+    // FIX: Build calendar placeholder with DOM instead of innerHTML so
+    //      acc.email (DB value) cannot inject HTML.
     const calContent = document.getElementById('calendar-content');
     if (calContent) {
-      calContent.innerHTML = `
-        <div style="font-size: 13px; color: #8e8e93; text-align: center; margin-top: 20px;">
-          Events for ${acc.email} will sync here.
-        </div>
-      `;
+      calContent.textContent = ''; // Clear safely
+      const placeholder = document.createElement('div');
+      placeholder.style.cssText = 'font-size: 13px; color: #8e8e93; text-align: center; margin-top: 20px;';
+      placeholder.textContent = `Events for ${acc.email} will sync here.`; // FIX: textContent
+      calContent.appendChild(placeholder);
     }
 
-    loadInbox(acc.id); 
+    loadInbox(acc.id);
   });
 
   btn.addEventListener('contextmenu', (e) => {
@@ -109,8 +156,7 @@ window.mailAPI?.onInitAccounts((accounts) => {
     startOnboarding();
   } else {
     accounts.forEach(acc => createSidebarButton(acc));
-    const firstBtn = document.querySelector('.mail-btn');
-    if (firstBtn) firstBtn.click();
+    document.querySelector('.mail-btn')?.click();
   }
 });
 
@@ -119,7 +165,7 @@ window.mailAPI?.onNewAccount((acc) => {
   if (isTutorialActive) {
     showDeleteTutorial();
   } else {
-    if (newBtn) newBtn.click();
+    newBtn?.click();
   }
 });
 
@@ -130,14 +176,24 @@ window.mailAPI?.onAccountDeleted((id) => {
     btnToRemove.remove();
     if (wasActive) {
       const nextBtn = document.querySelector('.mail-btn');
-      if (nextBtn) nextBtn.click();
-      else {
-        // No accounts left, clear the screen completely
+      if (nextBtn) {
+        nextBtn.click();
+      } else {
+        // No accounts left — clear the UI
         const inboxContainer = document.getElementById('inbox-items');
-        if(inboxContainer) inboxContainer.innerHTML = '';
-        if(document.getElementById('reader-subject')) document.getElementById('reader-subject').innerText = "Select an email";
-        if(document.getElementById('reader-sender')) document.getElementById('reader-sender').innerText = "---";
-        if(document.getElementById('reader-body')) document.getElementById('reader-body').innerHTML = "";
+        if (inboxContainer) inboxContainer.innerHTML = '';
+
+        const subjectEl = document.getElementById('reader-subject');
+        if (subjectEl) subjectEl.textContent = 'Select an email';
+
+        const senderEl = document.getElementById('reader-sender');
+        if (senderEl) senderEl.textContent = '---';
+
+        const reader = document.getElementById('reader-body');
+        if (reader) {
+          if (reader.shadowRoot) reader.shadowRoot.innerHTML = '';
+          reader.innerHTML = '';
+        }
       }
     }
   }
@@ -147,7 +203,7 @@ window.mailAPI?.onAccountUpdated(({ id, newName }) => {
   const btn = document.getElementById(id);
   if (btn) {
     const label = btn.querySelector('.btn-label');
-    if (label) label.innerText = newName;
+    if (label) label.textContent = newName; // FIX: textContent
     btn.title = newName;
   }
 });
@@ -155,12 +211,12 @@ window.mailAPI?.onAccountUpdated(({ id, newName }) => {
 window.mailAPI?.onNewMailArrived((accountId) => {
   const activeBtn = document.querySelector('.mail-btn.active');
   if (activeBtn && activeBtn.id === accountId) {
-    loadInbox(accountId); 
+    loadInbox(accountId);
   }
 });
 
 // =============================================================================
-// UI EVENT LISTENERS (ARMORED)
+// UI EVENT LISTENERS
 // =============================================================================
 
 document.getElementById('btn-add')?.addEventListener('click', () => {
@@ -175,50 +231,51 @@ document.getElementById('btn-delete-email')?.addEventListener('click', async (e)
   if (!currentOpenEmail) return;
 
   const btn = e.currentTarget;
-  // Visual feedback instantly
-  btn.style.opacity = '0.5';
+  btn.style.opacity       = '0.5';
   btn.style.pointerEvents = 'none';
 
   const success = await window.mailAPI.deleteEmail({
-    id: currentOpenEmail.id,
+    id:         currentOpenEmail.id,
     account_id: currentOpenEmail.account_id,
-    uid: currentOpenEmail.uid,
-    folder: currentOpenEmail.folder
+    uid:        currentOpenEmail.uid,
+    folder:     currentOpenEmail.folder,
   });
 
   if (success) {
-    document.getElementById('reader-subject').innerText = "Select an email";
-    document.getElementById('reader-sender').innerText = "---";
-    document.getElementById('reader-body').innerHTML = "";
-    
-    // Reset button state
-    btn.style.display = 'none';
-    btn.style.opacity = '1';
+    const subjectEl = document.getElementById('reader-subject');
+    if (subjectEl) subjectEl.textContent = 'Select an email';
+
+    const senderEl = document.getElementById('reader-sender');
+    if (senderEl) senderEl.textContent = '---';
+
+    const reader = document.getElementById('reader-body');
+    if (reader) {
+      if (reader.shadowRoot) reader.shadowRoot.innerHTML = '';
+      reader.innerHTML = '';
+    }
+
+    btn.style.display       = 'none';
+    btn.style.opacity       = '1';
     btn.style.pointerEvents = 'auto';
-    
+
     loadInbox(currentOpenEmail.account_id);
     currentOpenEmail = null;
   } else {
-    btn.style.opacity = '1';
+    btn.style.opacity       = '1';
     btn.style.pointerEvents = 'auto';
   }
 });
 
 // Calendar Toggle
 document.getElementById('btn-toggle-calendar')?.addEventListener('click', () => {
-  const calendarSidebar = document.getElementById('calendar-sidebar');
-  const btnToggleCalendar = document.getElementById('btn-toggle-calendar');
-  calendarSidebar?.classList.toggle('sidebar-collapsed');
-  btnToggleCalendar?.classList.toggle('active');
+  document.getElementById('calendar-sidebar')?.classList.toggle('sidebar-collapsed');
+  document.getElementById('btn-toggle-calendar')?.classList.toggle('active');
 });
 
 // =============================================================================
 // INLINE COMPOSE LOGIC
 // =============================================================================
-// --- RICH TEXT FORMATTING LOGIC ---
-// --- RICH TEXT FORMATTING LOGIC ---
 
-// 1. The Format Actions
 document.getElementById('format-bold')?.addEventListener('click', () => {
   document.execCommand('bold', false, null);
   updateFormatButtonsState();
@@ -233,44 +290,40 @@ document.getElementById('format-underline')?.addEventListener('click', () => {
 });
 document.getElementById('format-highlight')?.addEventListener('click', () => {
   document.execCommand('hiliteColor', false, 'rgba(255, 214, 10, 0.5)');
-  // Highlight is trickier to detect natively, so we just flash it
 });
 
-document.getElementById('format-font')?.addEventListener('change', (e) => document.execCommand('fontName', false, e.target.value));
-document.getElementById('format-size')?.addEventListener('change', (e) => document.execCommand('fontSize', false, e.target.value));
+document.getElementById('format-font')?.addEventListener('change', (e) =>
+  document.execCommand('fontName', false, e.target.value)
+);
+document.getElementById('format-size')?.addEventListener('change', (e) =>
+  document.execCommand('fontSize', false, e.target.value)
+);
 
-
-// 2. The State Checker (This makes the buttons light up!)
-// 2. The State Checker (This makes the buttons light up!)
 function updateFormatButtonsState() {
-  const isBold = document.queryCommandState('bold');
-  const isItalic = document.queryCommandState('italic');
+  const isBold      = document.queryCommandState('bold');
+  const isItalicOn  = document.queryCommandState('italic');
   const isUnderline = document.queryCommandState('underline');
 
-  // Highlight requires a special detective check!
   let isHighlight = false;
   const selection = window.getSelection();
   if (selection && selection.focusNode) {
     let element = selection.focusNode;
-    // If the cursor is inside a raw text node, grab the span/div wrapping it
-    if (element.nodeType === 3) element = element.parentNode; 
-    
-    // Check if it has a background color painted on it
+    if (element.nodeType === 3) element = element.parentNode;
     const bgColor = window.getComputedStyle(element).backgroundColor;
-    isHighlight = (bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent');
+    isHighlight = bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent';
   }
 
   document.getElementById('format-bold')?.classList.toggle('is-active', isBold);
-  document.getElementById('format-italic')?.classList.toggle('is-active', isItalic);
+  document.getElementById('format-italic')?.classList.toggle('is-active', isItalicOn);
   document.getElementById('format-underline')?.classList.toggle('is-active', isUnderline);
-  document.getElementById('format-highlight')?.classList.toggle('is-active', isHighlight); // <--- Added!
+  document.getElementById('format-highlight')?.classList.toggle('is-active', isHighlight);
 }
-// 3. Listen to the user typing or clicking around the text box
+
 const inlineBody = document.getElementById('inline-body');
 if (inlineBody) {
-  inlineBody.addEventListener('keyup', updateFormatButtonsState);   // Checks when you type or use arrow keys
-  inlineBody.addEventListener('mouseup', updateFormatButtonsState); // Checks when you click somewhere in the text
-  inlineBody.addEventListener('click', updateFormatButtonsState);
+  inlineBody.addEventListener('keyup',   updateFormatButtonsState);
+  inlineBody.addEventListener('mouseup', updateFormatButtonsState);
+  inlineBody.addEventListener('click',   updateFormatButtonsState);
 }
 
 document.getElementById('toggle-important')?.addEventListener('click', (e) => {
@@ -279,42 +332,48 @@ document.getElementById('toggle-important')?.addEventListener('click', (e) => {
 });
 
 function toggleComposeView(isComposing) {
-  const readerView = document.getElementById('reader-view');
+  const readerView  = document.getElementById('reader-view');
   const composeView = document.getElementById('inline-compose');
-  const btnReply = document.getElementById('btn-reply-email');
+  const btnCompose  = document.getElementById('btn-compose');
+  const btnReply    = document.getElementById('btn-reply-email');
   const dividerMain = document.getElementById('pill-divider-main');
-  const composeBtns = document.querySelectorAll('.compose-only'); 
+  const composeBtns = document.querySelectorAll('.compose-only');
 
   if (isComposing) {
-    if(readerView) readerView.style.display = 'none';
-    if(composeView) composeView.style.display = 'flex';
-    
-    if (btnReply) btnReply.style.display = 'none';
-    if (document.getElementById('btn-delete-email')) document.getElementById('btn-delete-email').style.display = 'none';
+    if (readerView)  readerView.style.display  = 'none';
+    if (composeView) composeView.style.display = 'flex';
+    if (btnCompose)  btnCompose.style.display  = 'none';
+    if (btnReply)    btnReply.style.display    = 'none';
+    const delBtn = document.getElementById('btn-delete-email');
+    if (delBtn) delBtn.style.display = 'none';
     if (dividerMain) dividerMain.style.display = 'none';
     composeBtns.forEach(el => el.style.display = 'flex');
     isImportant = false;
     document.getElementById('toggle-important')?.classList.remove('is-active');
     document.getElementById('inline-body')?.focus();
   } else {
-    if(composeView) composeView.style.display = 'none';
-    if(readerView) readerView.style.display = 'block';
-    
+    if (composeView) composeView.style.display = 'none';
+    if (readerView)  readerView.style.display  = 'block';
     composeBtns.forEach(el => el.style.display = 'none');
+    if (btnCompose)  btnCompose.style.display  = 'flex';
     if (btnReply) btnReply.style.display = 'flex';
-    if (currentOpenEmail && document.getElementById('btn-delete-email')) document.getElementById('btn-delete-email').style.display = 'flex';
+    const delBtn = document.getElementById('btn-delete-email');
+    if (currentOpenEmail && delBtn) delBtn.style.display = 'flex';
     if (dividerMain) dividerMain.style.display = 'block';
   }
 }
 
 document.getElementById('btn-compose')?.addEventListener('click', () => {
-  const activeBtn = document.querySelector('.sidebar button.active');
-  const accountId = activeBtn ? activeBtn.id : null;
-  if (!accountId) return alert("Select an account first!");
+  const activeBtn   = document.querySelector('.sidebar button.active');
+  const accountId   = activeBtn ? activeBtn.id : null;
+  if (!accountId) return alert('Select an account first!');
 
-  if(document.getElementById('inline-to')) document.getElementById('inline-to').value = '';
-  if(document.getElementById('inline-subject')) document.getElementById('inline-subject').value = '';
-  if(document.getElementById('inline-body')) document.getElementById('inline-body').innerHTML = '';
+  const toEl      = document.getElementById('inline-to');
+  const subjectEl = document.getElementById('inline-subject');
+  const bodyEl    = document.getElementById('inline-body');
+  if (toEl)      toEl.value      = '';
+  if (subjectEl) subjectEl.value = '';
+  if (bodyEl)    bodyEl.innerHTML = '';
 
   toggleComposeView(true);
 });
@@ -322,24 +381,35 @@ document.getElementById('btn-compose')?.addEventListener('click', () => {
 document.getElementById('btn-reply-email')?.addEventListener('click', () => {
   if (!currentOpenEmail) return;
 
-  const dateStr = new Date(currentOpenEmail.date).toLocaleString();
-  const safeSender = currentOpenEmail.sender || "Unknown";
-  const safeSubject = currentOpenEmail.subject || "No Subject";
-  
+  const dateStr    = new Date(currentOpenEmail.date).toLocaleString();
+  const safeSender = currentOpenEmail.sender  || 'Unknown';
+  const safeSubject = currentOpenEmail.subject || 'No Subject';
+
+  // FIX: Sanitize the quoted email body before injecting it into the
+  //      contenteditable compose area.  Previously this was raw innerHTML.
+  const cleanQuotedBody = sanitizeEmailHtml(currentOpenEmail.body_html);
+
+  // FIX: Escape sender and date when building the HTML template so a crafted
+  //      sender name (e.g. `<img onerror=...>`) cannot break out of the text node.
   const quotedBody = `
     <p><br></p>
     <div style="color: #8e8e93; font-size: 13px; margin-top: 40px; margin-bottom: 8px;">
-      On ${dateStr}, ${safeSender} wrote:
+      On ${escapeHtml(dateStr)}, ${escapeHtml(safeSender)} wrote:
     </div>
     <blockquote style="border-left: 3px solid #0A84FF; margin: 0; padding-left: 12px; color: #d1d1d6; overflow: hidden;">
-      ${currentOpenEmail.body_html || ""}
+      ${cleanQuotedBody}
     </blockquote>
   `;
 
   const emailMatch = safeSender.match(/<([^>]+)>/);
-  if(document.getElementById('inline-to')) document.getElementById('inline-to').value = emailMatch ? emailMatch[1] : safeSender;
-  if(document.getElementById('inline-subject')) document.getElementById('inline-subject').value = safeSubject.startsWith('Re:') ? safeSubject : `Re: ${safeSubject}`;
-  if(document.getElementById('inline-body')) document.getElementById('inline-body').innerHTML = quotedBody;
+  const toEl = document.getElementById('inline-to');
+  if (toEl) toEl.value = emailMatch ? emailMatch[1] : safeSender;
+
+  const subjectEl = document.getElementById('inline-subject');
+  if (subjectEl) subjectEl.value = safeSubject.startsWith('Re:') ? safeSubject : `Re: ${safeSubject}`;
+
+  const bodyEl = document.getElementById('inline-body');
+  if (bodyEl) bodyEl.innerHTML = quotedBody;
 
   toggleComposeView(true);
 });
@@ -348,50 +418,53 @@ document.getElementById('pill-btn-cancel')?.addEventListener('click', () => togg
 
 document.getElementById('pill-btn-send')?.addEventListener('click', async () => {
   const activeBtn = document.querySelector('.sidebar button.active');
-  
+
   const data = {
-    accountId: activeBtn?.id, 
-    to: document.getElementById('inline-to')?.value,
-    subject: document.getElementById('inline-subject')?.value,
-    body: document.getElementById('inline-body')?.innerHTML,
-    priority: isImportant ? 'high' : 'normal' // <--- ADDED THIS LINE
+    accountId: activeBtn?.id,
+    to:        document.getElementById('inline-to')?.value,
+    subject:   document.getElementById('inline-subject')?.value,
+    body:      document.getElementById('inline-body')?.innerHTML,
+    priority:  isImportant ? 'high' : 'normal',
   };
 
-  if (!data.to || !data.subject) return alert("Please fill in recipient and subject");
+  if (!data.to || !data.subject) return alert('Please fill in recipient and subject');
 
   const sendBtn = document.getElementById('pill-btn-send');
-  if(sendBtn) {
-    sendBtn.disabled = true;
-    sendBtn.innerHTML = "Sending...";
+  if (sendBtn) {
+    sendBtn.disabled  = true;
+    sendBtn.textContent = 'Sending...';
   }
 
   const success = await window.mailAPI.sendEmail(data);
-  
-  if(sendBtn) {
+
+  if (sendBtn) {
     sendBtn.disabled = false;
+    // Safe to use innerHTML here — content is our own hardcoded icon, not user data
     sendBtn.innerHTML = `<span class="material-symbols-outlined" style="font-size: 16px !important; margin-right: 4px;">send</span> Send`;
   }
 
   if (success) {
-    toggleComposeView(false); 
+    toggleComposeView(false);
   } else {
-    alert("Failed to send email. Check console.");
+    alert('Failed to send email. Check console.');
   }
 });
 
 // =============================================================================
-// V2 NATIVE EMAIL ENGINE
+// INBOX LOADER
 // =============================================================================
 
 async function loadInbox(accountId) {
   const inboxContainer = document.getElementById('inbox-items');
   if (!inboxContainer) return;
 
+  // Safe — this is our own static string
   inboxContainer.innerHTML = '<p style="color: #666; font-size: 14px; padding: 0 20px;">Syncing database...</p>';
 
   const emails = await window.mailAPI.getEmails(accountId);
 
   if (emails.length === 0) {
+    // Safe — this is our own static string with no user data
     inboxContainer.innerHTML = `
       <div class="inbox-empty-state">
         <span class="material-symbols-outlined">inbox</span>
@@ -403,42 +476,104 @@ async function loadInbox(accountId) {
 
   inboxContainer.innerHTML = '';
 
- emails.forEach(email => {
+  emails.forEach(email => {
     const el = document.createElement('div');
     el.className = 'email-item';
 
-    const safeSender = email.sender || "Unknown";
+    const safeSender = email.sender || 'Unknown';
     const senderName = safeSender.split('<')[0].trim() || 'Unknown Sender';
-    
-    // NEW: Check priority and generate a red icon if important
-    const isImportant = email.priority === 'high';
-    const importantIcon = isImportant ? `<span class="material-symbols-outlined" style="color: #ff5f56; font-size: 16px !important; margin-right: 6px; vertical-align: bottom;">priority_high</span>` : '';
+    const emailIsImportant = email.priority === 'high';
 
-    el.innerHTML = `
-      <div class="email-sender">${senderName}</div>
-      <div class="email-subject">${importantIcon}${email.subject || '(No Subject)'}</div>
-      <div class="email-snippet">${email.snippet || ''}</div>
-    `;
+    // ── FIX: Build each row with DOM APIs — no untrusted data in innerHTML ──
 
+    const senderEl = document.createElement('div');
+    senderEl.className   = 'email-sender';
+    senderEl.textContent = senderName; // FIX: textContent
+
+    const subjectEl = document.createElement('div');
+    subjectEl.className = 'email-subject';
+    if (emailIsImportant) {
+      const icon = document.createElement('span');
+      icon.className = 'material-symbols-outlined';
+      icon.style.cssText = 'color: #ff5f56; font-size: 16px !important; margin-right: 6px; vertical-align: bottom;';
+      icon.textContent = 'priority_high'; // FIX: textContent for the icon name too
+      subjectEl.appendChild(icon);
+    }
+    // Append the subject as a plain text node — safe even if subject contains HTML
+    subjectEl.appendChild(
+      document.createTextNode(email.subject || '(No Subject)')
+    );
+
+    const snippetEl = document.createElement('div');
+    snippetEl.className   = 'email-snippet';
+    snippetEl.textContent = email.snippet || ''; // FIX: textContent
+
+    el.appendChild(senderEl);
+    el.appendChild(subjectEl);
+    el.appendChild(snippetEl);
+
+    // ── Click handler — open email in reader pane ──
     el.onclick = () => {
       document.querySelectorAll('.email-item').forEach(item => item.classList.remove('active'));
       el.classList.add('active');
-      currentOpenEmail = email; 
-      
-      if(document.getElementById('btn-delete-email')) {
-        const delBtn = document.getElementById('btn-delete-email');
-        delBtn.style.display = 'flex';
-        delBtn.style.opacity = '1';
+      currentOpenEmail = email;
+
+      const delBtn = document.getElementById('btn-delete-email');
+      if (delBtn) {
+        delBtn.style.display       = 'flex';
+        delBtn.style.opacity       = '1';
         delBtn.style.pointerEvents = 'auto';
       }
-      
-      // NEW: Show the important icon in the big reader view header too!
-      if(document.getElementById('reader-subject')) document.getElementById('reader-subject').innerHTML = `${importantIcon} ${email.subject || "(No Subject)"}`;
-      
-      if(document.getElementById('reader-sender')) document.getElementById('reader-sender').innerText = `From: ${safeSender} \nDate: ${new Date(email.date).toLocaleString()}`;
-      
-      const cleanHtml = window.DOMPurify ? window.DOMPurify.sanitize(email.body_html) : email.body_html;
-      if(document.getElementById('reader-body')) document.getElementById('reader-body').innerHTML = cleanHtml; 
+
+      // FIX: Build the subject heading with DOM so a crafted subject like
+      //      <img src=x onerror=alert(1)> cannot execute.
+      const readerSubject = document.getElementById('reader-subject');
+      if (readerSubject) {
+        readerSubject.textContent = ''; // clear
+        if (emailIsImportant) {
+          const icon = document.createElement('span');
+          icon.className = 'material-symbols-outlined';
+          icon.style.cssText = 'color: #ff5f56; font-size: 16px !important; margin-right: 6px; vertical-align: middle;';
+          icon.textContent = 'priority_high';
+          readerSubject.appendChild(icon);
+        }
+        readerSubject.appendChild(
+          document.createTextNode(email.subject || '(No Subject)')
+        );
+      }
+
+      // sender + date are plain text — innerText is fine here
+      const readerSender = document.getElementById('reader-sender');
+      if (readerSender) {
+        readerSender.innerText = `From: ${safeSender}\nDate: ${new Date(email.date).toLocaleString()}`;
+      }
+
+      // ── Render email body inside a Shadow DOM ──
+      // The Shadow DOM isolates the email's CSS from the app's own styles.
+      // DOMPurify removes scripts/handlers; the shadow boundary stops style leakage.
+      const cleanHtml  = sanitizeEmailHtml(email.body_html);
+      const readerBody = document.getElementById('reader-body');
+
+      if (readerBody) {
+        if (!readerBody.shadowRoot) {
+          readerBody.attachShadow({ mode: 'open' });
+        }
+        // The style block here is our own code — safe to use innerHTML for the
+        // shadow root.  The email HTML itself has already been sanitized above.
+        readerBody.shadowRoot.innerHTML = `
+          <style>
+            :host {
+              color: #d1d1d6;
+              font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+              line-height: 1.6;
+            }
+            a   { color: #0A84FF; }
+            img { max-width: 100%; height: auto; border-radius: 8px; }
+            *   { word-wrap: break-word; }
+          </style>
+          ${cleanHtml}
+        `;
+      }
     };
 
     inboxContainer.appendChild(el);
@@ -448,6 +583,6 @@ async function loadInbox(accountId) {
 // =============================================================================
 // WINDOW CONTROLS (TRAFFIC LIGHTS)
 // =============================================================================
-document.querySelector('.light.close')?.addEventListener('click', () => window.mailAPI.closeApp());
+document.querySelector('.light.close')?.addEventListener('click',    () => window.mailAPI.closeApp());
 document.querySelector('.light.minimize')?.addEventListener('click', () => window.mailAPI.minimizeApp());
 document.querySelector('.light.maximize')?.addEventListener('click', () => window.mailAPI.maximizeApp());

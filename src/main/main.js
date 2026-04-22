@@ -1,267 +1,341 @@
 // src/main/main.js
-require('dotenv').config(); 
-const { app, BrowserWindow, session, shell, ipcMain, Menu, MenuItem, safeStorage } = require('electron');
-const path = require('path');
-const nodemailer = require('nodemailer');
-const fs = require('fs');
-const windowStateKeeper = require('electron-window-state');
-const { autoUpdater } = require('electron-updater');
+// =============================================================================
+// SECURITY HARDENED - See SECURITY.md for a full list of fixes applied
+// =============================================================================
 
-// 1. CRITICAL: Set the V2 data path before ANYTHING else
+require('dotenv').config();
+const {
+  app, BrowserWindow, shell, ipcMain, Menu, safeStorage
+} = require('electron');
+const path    = require('path');
+const crypto  = require('crypto');   // Built-in Node module — used for PKCE
+const fs      = require('fs');
+const nodemailer = require('nodemailer');
+const windowStateKeeper = require('electron-window-state');
+const { autoUpdater }   = require('electron-updater');
+const axios             = require('axios');
+
+// ─── IMPORTANT: jwks-rsa and jsonwebtoken must be installed ──────────────────
+// Run:  npm install jwks-rsa jsonwebtoken
+// ─────────────────────────────────────────────────────────────────────────────
+const jwksClient = require('jwks-rsa');
+const jwt        = require('jsonwebtoken');
+
+// 1. Set the userData path BEFORE anything else touches the filesystem
 app.setPath('userData', path.join(app.getPath('appData'), 'RYZE_V2_Data'));
 
 const { initDB, db } = require('./db');
 const { MailEngine } = require('./imap');
 
-// --- PERFORMANCE OPTIMIZATIONS ---
-app.disableHardwareAcceleration(); 
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512'); 
+// --- Performance switches ---
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
 const SERVICE_MAP = {
-  'gmail': { name: 'Gmail', icon: 'mail' },
-  'outlook': { name: 'Outlook/Hotmail', icon: 'alternate_email' },
-  'icloud': { name: 'iCloud', icon: 'cloud' },
+  gmail:   { name: 'Gmail',            icon: 'mail'            },
+  outlook: { name: 'Outlook/Hotmail',  icon: 'alternate_email' },
+  icloud:  { name: 'iCloud',           icon: 'cloud'           },
 };
 
+// Shared webPreferences applied to EVERY popup window (rename, delete, add, update).
+// sandbox: true is now consistent across the whole app.
+const POPUP_WEB_PREFS = {
+  preload:          path.join(__dirname, '../preload/preload.js'),
+  contextIsolation: true,
+  sandbox:          true,
+  nodeIntegration:  false,
+};
+
+// =============================================================================
+// SECURITY HELPER — isTrustedSender
+// Rejects any IPC message that did not originate from our own file:// pages.
+// This prevents a hypothetical compromised third-party web page (loaded in a
+// BrowserView etc.) from invoking privileged main-process actions.
+// =============================================================================
 function isTrustedSender(sender) {
   try {
     return sender.getURL().startsWith('file://');
-  } catch (e) {
+  } catch {
     return false;
   }
 }
 
-let mainWindow;
-const activeEngines = new Map();
+// =============================================================================
+// MICROSOFT OAUTH 2.0  +  PKCE
+// =============================================================================
+// WHY NO CLIENT SECRET?
+//   Desktop apps are "public clients" — the binary is on the user's machine,
+//   so any secret embedded in it can be extracted.  Microsoft requires PKCE
+//   for public clients instead of a client secret.
+//   Azure portal: set "Mobile and desktop applications" as platform type.
+//
+// HOW PKCE WORKS (short version):
+//   1. We generate a random `code_verifier` (lives in memory only).
+//   2. We hash it → `code_challenge` and include it in the auth URL.
+//   3. Microsoft stores the challenge.
+//   4. We send the verifier (not the challenge) during token exchange.
+//   5. Microsoft re-hashes it and checks it matches — proving WE started the flow.
+//   No secret ever leaves memory or hits the database.
+// =============================================================================
 
-function createWindow() {
-  let state = windowStateKeeper({ defaultWidth: 1200, defaultHeight: 800 });
-  mainWindow = new BrowserWindow({
-    x: state.x, y: state.y, width: state.width, height: state.height,
-    minWidth: 800,
-    minHeight: 600,
-    frame: false, backgroundColor: '#1c1c1e',
-    icon: path.join(__dirname, '../assets/logo.ico'),
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/preload.js'),
-      contextIsolation: true,
-      sandbox: true,
-      nodeIntegration: false
-    }
-  });
-
-  state.manage(mainWindow);
-  mainWindow.loadFile(path.join(__dirname, '../renderer/pages/index.html'));
-  mainWindow.on('closed', () => { mainWindow = null; });
-}
-
-// --- V2 DATABASE IPC HANDLERS ---
-
-const axios = require('axios'); // Add this at the top of main.js
-
-// YOUR MICROSOFT KEYS (From Azure Portal)
 const MS_CONFIG = {
-  clientId: process.env.AZURE_CLIENT_ID,
-  clientSecret: process.env.AZURE_CLIENT_SECRET,
-  authority: 'https://login.microsoftonline.com/common/oauth2/v2.0',
-  redirectUri: 'http://localhost'
+  // Only the client ID is needed — NO client secret
+  clientId:    process.env.AZURE_CLIENT_ID,
+  authority:   'https://login.microsoftonline.com/common/oauth2/v2.0',
+  redirectUri: 'http://localhost',
 };
 
-// Inside src/main/main.js
-ipcMain.on('start-oauth', async (event, provider) => {
+// Held in memory only for the duration of a single OAuth round-trip
+let pkceVerifier = null;
+
+/** Generates a PKCE verifier + SHA-256 challenge pair. */
+function generatePKCE() {
+  const verifier  = crypto.randomBytes(64).toString('base64url');
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  return { verifier, challenge };
+}
+
+// =============================================================================
+// JWT VERIFICATION — Microsoft ID Tokens
+// =============================================================================
+// Why verify?  An attacker who can intercept the redirect could theoretically
+// craft a token with a different email address.  Signature verification using
+// Microsoft's published public keys (JWKS) closes that door.
+// =============================================================================
+
+const msJwksClient = jwksClient({
+  jwksUri:     'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+  cache:       true,
+  cacheMaxAge: 86_400_000, // 24 hours — refreshes daily so key rotations are picked up
+});
+
+function getSigningKey(header) {
+  return new Promise((resolve, reject) => {
+    msJwksClient.getSigningKey(header.kid, (err, key) => {
+      if (err) return reject(new Error(`JWKS lookup failed: ${err.message}`));
+      resolve(key.getPublicKey());
+    });
+  });
+}
+
+/** Verifies a Microsoft-issued ID token; returns the decoded payload or throws. */
+async function verifyMicrosoftIdToken(idToken) {
+  const decoded = jwt.decode(idToken, { complete: true });
+  if (!decoded) throw new Error('Cannot decode ID token');
+
+  const publicKey = await getSigningKey(decoded.header);
+
+  // jwt.verify throws if signature, expiry, issuer, or audience checks fail
+  return jwt.verify(idToken, publicKey, {
+    algorithms: ['RS256'],
+    audience:   MS_CONFIG.clientId,
+    // Microsoft uses different issuer formats for personal vs work accounts
+    issuer: [
+      `https://login.microsoftonline.com/${decoded.payload.tid}/v2.0`,
+      `https://sts.windows.net/${decoded.payload.tid}/`,
+    ],
+  });
+}
+
+// =============================================================================
+// OAUTH IPC HANDLER
+// =============================================================================
+ipcMain.on('start-oauth', (event, provider) => {
+  if (!isTrustedSender(event.sender)) return; // FIX: was missing
+
   if (provider === 'outlook') {
-    const authUrl = `${MS_CONFIG.authority}/authorize?` + 
+    const { verifier, challenge } = generatePKCE();
+    pkceVerifier = verifier; // Memory only — never written to disk
+
+    const authUrl =
+      `${MS_CONFIG.authority}/authorize?` +
       `client_id=${MS_CONFIG.clientId}` +
       `&response_type=code` +
       `&redirect_uri=${encodeURIComponent(MS_CONFIG.redirectUri)}` +
       `&response_mode=query` +
       `&scope=${encodeURIComponent('openid profile email offline_access https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send')}` +
+      `&code_challenge=${challenge}` +       // PKCE
+      `&code_challenge_method=S256` +        // PKCE
       `&prompt=select_account`;
 
-    // 1. Updated Size: 550 x 750
+    // FIX: Use a plain framed window — no executeJavaScript injection into
+    //      Microsoft's login page.  The OS window chrome is trusted enough.
     const authWin = new BrowserWindow({
-      width: 550, 
-      height: 750,
-      frame: false,           
-      resizable: false,
+      width:      550,
+      height:     750,
+      resizable:  false,
       alwaysOnTop: true,
+      title:      'RYZE V2 — Sign in with Microsoft',
       backgroundColor: '#ffffff',
       webPreferences: {
-        partition: 'auth-' + Date.now()
-      }
+        // Isolated session so the Microsoft cookie stays separate from the app
+        partition:        `auth-${Date.now()}`,
+        contextIsolation: true,
+        sandbox:          true,
+        nodeIntegration:  false,
+      },
     });
 
-    // 2. Injecting a REAL Header and Close Button
-    authWin.webContents.on('did-finish-load', () => {
-      // Inject Styles for the Header and Red Close Button
-      authWin.webContents.insertCSS(`
-        #ryze-header {
-          position: fixed; top: 0; left: 0; width: 100%; height: 44px;
-          background: #1c1c1e; color: #0A84FF; z-index: 99999;
-          display: flex; align-items: center; justify-content: center;
-          font-family: -apple-system, sans-serif; font-size: 11px;
-          font-weight: 800; letter-spacing: 1.5px;
-          border-bottom: 1px solid rgba(255,255,255,0.1);
-          -webkit-app-region: drag; /* Makes the bar draggable */
-        }
-        #ryze-close {
-          position: absolute; left: 14px; top: 14px;
-          width: 14px; height: 14px; background: #ff5f56;
-          border-radius: 50%; cursor: pointer;
-          -webkit-app-region: no-drag; /* Makes the button clickable */
-          display: flex; align-items: center; justify-content: center;
-          transition: background 0.2s;
-        }
-        #ryze-close:hover { background: #ff3b30; }
-        #ryze-close::after { content: '✕'; color: rgba(0,0,0,0.5); font-size: 8px; opacity: 0; }
-        #ryze-close:hover::after { opacity: 1; }
-        body { padding-top: 44px !important; } /* Push MS content down */
-      `);
+    authWin.setMenu(null); // No menu bar needed in a login popup
 
-      // Inject the HTML element and the Close Logic
-      authWin.webContents.executeJavaScript(`
-        if (!document.getElementById('ryze-header')) {
-          const header = document.createElement('div');
-          header.id = 'ryze-header';
-          header.innerHTML = '<div id="ryze-close"></div>RYZE V2 SECURE LOGIN';
-          document.body.appendChild(header);
-          document.getElementById('ryze-close').onclick = () => window.close();
-        }
-      `);
-    });
-
-    authWin.loadURL(authUrl);
-
-    // Keep the keyboard shortcut as a backup
-    authWin.webContents.on('before-input-event', (e, input) => {
+    authWin.webContents.on('before-input-event', (_e, input) => {
       if (input.key === 'Escape') authWin.close();
     });
 
-    authWin.webContents.on('will-redirect', async (e, url) => {
+    authWin.webContents.on('will-redirect', async (_e, url) => {
       if (url.startsWith(MS_CONFIG.redirectUri)) {
-        e.preventDefault();
-        const urlParams = new URL(url).searchParams;
-        const code = urlParams.get('code');
+        _e.preventDefault();
+        const code = new URL(url).searchParams.get('code');
         if (code) {
           authWin.close();
           await exchangeCodeForTokens(code);
         }
       }
     });
+
+    authWin.loadURL(authUrl);
   }
 });
 
-async function getValidAccessToken(accountId) {
-  // 1. We MUST fetch the account here too, because this is a separate function scope!
-  const acc = db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId);
-  
-  if (!acc) return null;
-
-  // 2. Check if the token is about to expire (within 5 minutes)
-  if (acc.refresh_token && Date.now() > (acc.token_expiry - 300000)) {
-    console.log(`Refreshing Microsoft Token for: ${acc.email}`);
-    
-    try {
-      const response = await axios.post(`${MS_CONFIG.authority}/token`, 
-        new URLSearchParams({
-          client_id: MS_CONFIG.clientId,
-          client_secret: MS_CONFIG.clientSecret, 
-          refresh_token: acc.refresh_token,
-          grant_type: 'refresh_token'
-        })
-      );
-
-      const { access_token, expires_in } = response.data;
-      const newExpiry = Date.now() + (expires_in * 1000);
-
-      // Save the fresh token so we don't have to refresh again for another hour
-      db.prepare('UPDATE accounts SET access_token = ?, token_expiry = ? WHERE id = ?')
-        .run(access_token, newExpiry, accountId);
-        
-      return access_token;
-    } catch (err) {
-      console.error("Failed to refresh token:", err.response?.data || err.message);
-      return acc.access_token; // Fallback to old token and hope for the best
-    }
-  }
-  
-  return acc.access_token;
-}
-
+// =============================================================================
+// TOKEN EXCHANGE
+// =============================================================================
 async function exchangeCodeForTokens(code) {
   try {
-    const response = await axios.post(`${MS_CONFIG.authority}/token`, 
+    // PKCE: send code_verifier in place of client_secret
+    const response = await axios.post(
+      `${MS_CONFIG.authority}/token`,
       new URLSearchParams({
-        client_id: MS_CONFIG.clientId,
-        client_secret: MS_CONFIG.clientSecret,
-        code: code,
-        redirect_uri: MS_CONFIG.redirectUri,
-        grant_type: 'authorization_code'
+        client_id:     MS_CONFIG.clientId,
+        code,
+        redirect_uri:  MS_CONFIG.redirectUri,
+        grant_type:    'authorization_code',
+        code_verifier: pkceVerifier, // Proves we initiated this flow
       })
     );
 
-    // 1. Destructure id_token (this is the key for personal accounts!)
+    pkceVerifier = null; // Clear immediately after single use
+
     const { access_token, refresh_token, id_token, expires_in } = response.data;
-    
-    // 2. Decode the ID Token instead of the Access Token
-    // Personal accounts use Opaque access tokens which can't be split
-    const tokenToDecode = id_token || access_token;
-    if (!tokenToDecode.includes('.')) {
-      throw new Error("Received an opaque token without identity claims. Ensure 'openid' scope is present.");
-    }
 
-    const userInfo = JSON.parse(Buffer.from(tokenToDecode.split('.')[1], 'base64').toString());
+    // FIX: Verify the ID token's cryptographic signature before trusting its claims
+    const userInfo = await verifyMicrosoftIdToken(id_token);
     const email = userInfo.email || userInfo.upn || userInfo.preferred_username;
+    if (!email) throw new Error('Verified token contains no email claim');
 
-    // 3. Save to Database (the rest of your logic is perfect)
+    // FIX: Encrypt BOTH tokens with safeStorage before writing to the database.
+    //      Previously only Gmail passwords were encrypted; OAuth tokens were plain text.
+    const encryptedAccess  = safeStorage.encryptString(access_token).toString('base64');
+    const encryptedRefresh = safeStorage.encryptString(refresh_token).toString('base64');
+
     const accountId = `outlook-${Date.now()}`;
     db.prepare(`
       REPLACE INTO accounts (id, email, name, provider, access_token, refresh_token, token_expiry)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
-      accountId, 
-      email, 
-      'Outlook', 
-      'outlook', 
-      access_token, 
-      refresh_token, 
-      Date.now() + (expires_in * 1000)
+      accountId,
+      email,
+      'Outlook',
+      'outlook',
+      encryptedAccess,
+      encryptedRefresh,
+      Date.now() + expires_in * 1000
     );
-    const uiData = { 
-      id: String(accountId), 
-      name: 'Outlook', 
-      icon: 'alternate_email' 
-    };
 
-    mainWindow.webContents.send('new-account', { ...uiData });
+    mainWindow?.webContents.send('new-account', {
+      id:   String(accountId),
+      name: 'Outlook',
+      icon: 'alternate_email',
+    });
     initAccountEngine(accountId);
 
   } catch (error) {
-    // Instead of logging the whole object, log the specific message
-    const errorMsg = error.response?.data ? JSON.stringify(error.response.data) : error.message;
-    console.error('OAuth Token Exchange Failed:', errorMsg);
-    
-    // If you send a message back to the UI, make sure it's just a string
-    mainWindow.webContents.send('oauth-error', "Failed to exchange code for tokens.");
-}
+    const msg = error.response?.data
+      ? JSON.stringify(error.response.data)
+      : error.message;
+    console.error('OAuth Token Exchange Failed:', msg);
+    mainWindow?.webContents.send('oauth-error', 'Failed to sign in with Microsoft.');
+  }
 }
 
+// =============================================================================
+// TOKEN REFRESH
+// =============================================================================
+async function getValidAccessToken(accountId) {
+  const acc = db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId);
+  if (!acc) return null;
+
+  // Refresh if the token expires in less than 5 minutes
+  if (acc.refresh_token && Date.now() > acc.token_expiry - 300_000) {
+    console.log(`Refreshing Microsoft token for: ${acc.email}`);
+    try {
+      // FIX: Decrypt the stored refresh token before sending it
+      const refreshToken = safeStorage.decryptString(
+        Buffer.from(acc.refresh_token, 'base64')
+      );
+
+      const response = await axios.post(
+        `${MS_CONFIG.authority}/token`,
+        new URLSearchParams({
+          client_id:     MS_CONFIG.clientId,  // No client_secret — PKCE app
+          refresh_token: refreshToken,
+          grant_type:    'refresh_token',
+        })
+      );
+
+      const { access_token, expires_in } = response.data;
+      const newExpiry = Date.now() + expires_in * 1000;
+
+      // FIX: Encrypt the new access token before storing
+      const encryptedAccess = safeStorage.encryptString(access_token).toString('base64');
+      db.prepare('UPDATE accounts SET access_token = ?, token_expiry = ? WHERE id = ?')
+        .run(encryptedAccess, newExpiry, accountId);
+
+      return access_token; // Return the plain token for in-memory use this session
+
+    } catch (err) {
+      console.error('Token refresh failed:', err.response?.data || err.message);
+      // Fall through: try to decrypt and use the existing token
+    }
+  }
+
+  // Decrypt the stored token for use
+  try {
+    return safeStorage.decryptString(Buffer.from(acc.access_token, 'base64'));
+  } catch {
+    console.error(`Failed to decrypt access token for account ${accountId}`);
+    return null;
+  }
+}
+
+// =============================================================================
+// EMAIL IPC HANDLERS
+// =============================================================================
+
+ipcMain.handle('get-emails', async (event, accountId) => {
+  if (!isTrustedSender(event.sender)) return [];
+  try {
+    return db
+      .prepare('SELECT * FROM emails WHERE account_id = ? ORDER BY date DESC')
+      .all(accountId)
+      .map(row => ({ ...row }));
+  } catch (err) {
+    console.error('Failed to fetch emails:', err);
+    return [];
+  }
+});
 
 ipcMain.handle('delete-email', async (event, { id, account_id, uid, folder }) => {
   if (!isTrustedSender(event.sender)) return false;
-  
   try {
-    // 1. Delete from local SQLite Database instantly
     db.prepare('DELETE FROM emails WHERE id = ?').run(id);
-
-    // 2. Tell the specific IMAP engine to delete it from the cloud IN THE BACKGROUND
     const engine = activeEngines.get(account_id);
-    if (engine) {
-      // Fire and forget so the UI updates instantly!
-      engine.deleteEmailOnServer(uid, folder).catch(console.error);
-    }
-
+    if (engine) engine.deleteEmailOnServer(uid, folder).catch(console.error);
     return true;
   } catch (err) {
     console.error('Delete error:', err);
@@ -269,307 +343,316 @@ ipcMain.handle('delete-email', async (event, { id, account_id, uid, folder }) =>
   }
 });
 
-ipcMain.handle('get-emails', async (event, accountId) => {
-  if (!isTrustedSender(event.sender)) return [];
-  try {
-    const stmt = db.prepare('SELECT * FROM emails WHERE account_id = ? ORDER BY date DESC');
-    const rows = stmt.all(accountId);
-    
-    // Convert to a clean array of objects to ensure it can be cloned
-    return rows.map(row => ({ ...row })); 
-  } catch (error) {
-    console.error('Failed to fetch emails:', error);
-    return []; 
-  }
-})
-
 ipcMain.on('add-service', async (event, data) => {
-  if (!isTrustedSender(event.sender)) return; 
+  if (!isTrustedSender(event.sender)) return;
   if (!data || typeof data !== 'object') return;
-  
+
   const { type, name, email, password } = data;
+
+  // Basic input sanity checks before touching the database
+  if (!type || !email || !password) return;
+  if (!SERVICE_MAP[type]) return; // Reject unknown provider types
+
   const accountId = `${type}-${Date.now()}`;
-  const icon = SERVICE_MAP[type] ? SERVICE_MAP[type].icon : 'mail';
+  const icon      = SERVICE_MAP[type].icon;
 
   try {
     const encryptedToken = safeStorage.encryptString(password).toString('base64');
-    const insertStmt = db.prepare(`
-      INSERT INTO accounts (id, email, name, provider, encrypted_token) 
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    insertStmt.run(accountId, email, name, type, encryptedToken);
+    db.prepare(
+      'INSERT INTO accounts (id, email, name, provider, encrypted_token) VALUES (?, ?, ?, ?, ?)'
+    ).run(accountId, email, name, type, encryptedToken);
 
-    const isMicrosoft = (type === 'outlook' || email.includes('@hotmail') || email.includes('@live'));
-
+    const isMicrosoft = type === 'outlook' || email.includes('@hotmail') || email.includes('@live');
     const engine = new MailEngine({
-      id: accountId,
-      email: email,
-      type: type,
-      password: password,
-      // FIX: Force the modern O365 host for all Microsoft-based emails
-      host: isMicrosoft ? 'outlook.office365.com' : (type === 'gmail' ? 'imap.gmail.com' : 'imap.mail.me.com'),
-      port: 993
+      id: accountId, email, type, password,
+      host: isMicrosoft
+        ? 'outlook.office365.com'
+        : type === 'gmail'
+          ? 'imap.gmail.com'
+          : 'imap.mail.me.com',
+      port: 993,
     });
-    
-    activeEngines.set(accountId, engine); // Don't forget to store it in our active map!
 
-    console.log(`Connecting to new account: ${email}`);
-    
-    try {
-      // 1. Establish the connection FIRST
-      await engine.client.connect(); 
-      
-      // 2. Once connected, perform the initial sync
-      console.log(`Starting initial sync for: ${email}`);
-      await engine.syncFolder('INBOX');
-      
-      // 3. Start listening for new live emails
-      engine.startLiveListener(mainWindow);
+    activeEngines.set(accountId, engine);
+    await engine.client.connect();
+    await engine.syncFolder('INBOX');
+    engine.startLiveListener(mainWindow);
+    mainWindow?.webContents.send('new-account', { id: accountId, name, icon });
 
-      // 4. Tell the UI to add the button
-      mainWindow.webContents.send('new-account', { id: accountId, name: name, icon: icon });
-    } catch (connErr) {
-      console.error(`Failed to connect to ${email}:`, connErr.message);
-      // Optional: send an error back to the UI so the user knows it failed
-    }
-
-  } catch (error) {
-    console.error('Failed to add service:', error.message);
+  } catch (err) {
+    console.error('Failed to add service:', err.message);
   }
 });
 
 ipcMain.on('delete-account', (event, id) => {
   if (!isTrustedSender(event.sender)) return;
   db.prepare('DELETE FROM accounts WHERE id = ?').run(id);
-  
-  // Safely log out and stop the background sync engine so it doesn't keep running!
   const engine = activeEngines.get(id);
   if (engine) {
-    if (engine.client) engine.client.logout().catch(() => {});
+    engine.client?.logout().catch(() => {});
     activeEngines.delete(id);
   }
-  
-  mainWindow.webContents.send('account-deleted', id);
+  mainWindow?.webContents.send('account-deleted', id);
 });
 
 ipcMain.on('update-account-name', (event, { id, newName }) => {
   if (!isTrustedSender(event.sender)) return;
-  const safeName = newName.substring(0, 50);
+  // Trim and strip any HTML characters to prevent stored XSS in the sidebar label
+  const safeName = (newName || '').replace(/[<>"'&]/g, '').substring(0, 50);
   db.prepare('UPDATE accounts SET name = ? WHERE id = ?').run(safeName, id);
-  mainWindow.webContents.send('account-updated', { id, newName: safeName });
+  mainWindow?.webContents.send('account-updated', { id, newName: safeName });
 });
 
-// --- EMAIL SENDING (SMTP) ---
-
-
-// Add priority to the incoming arguments
+// =============================================================================
+// EMAIL SENDING (SMTP)
+// =============================================================================
 ipcMain.handle('send-email', async (event, { accountId, to, subject, body, priority }) => {
   if (!isTrustedSender(event.sender)) return false;
-  
-  try {
-    // 1. Fetch EVERYTHING we need from the database, especially the new tokens!
-    const acc = db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId);
-    if (!acc) throw new Error("No account found for sending");
-    
-    let authConfig = {};
 
-    // 2. Determine if we use OAuth2 (Microsoft) or Password (Gmail/Legacy)
+  try {
+    const acc = db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId);
+    if (!acc) throw new Error('No account found for sending');
+
+    let authConfig;
+
     if (acc.access_token) {
-      // For Microsoft: Get a fresh token before we even try to send
+      // Microsoft — get a (possibly refreshed + decrypted) token
       const freshToken = await getValidAccessToken(accountId);
       authConfig = {
-        type: 'OAuth2',
-        user: acc.email,
+        type:     'OAuth2',
+        user:     acc.email,
         clientId: MS_CONFIG.clientId,
-        clientSecret: MS_CONFIG.clientSecret,
-        refreshToken: acc.refresh_token,
-        accessToken: freshToken
+        // FIX: No clientSecret — PKCE public clients don't use one
+        accessToken: freshToken,
       };
     } else {
-      // For Gmail/Legacy: Use the encrypted password
-      const password = safeStorage.decryptString(Buffer.from(acc.encrypted_token, 'base64'));
-      authConfig = {
-        user: acc.email,
-        pass: password
-      };
+      // Gmail / iCloud — decrypt stored app password
+      const password = safeStorage.decryptString(
+        Buffer.from(acc.encrypted_token, 'base64')
+      );
+      authConfig = { user: acc.email, pass: password };
     }
 
-    // 3. Create the Transporter
     const transporter = nodemailer.createTransport({
-      // Use the specific Outlook/Office365 service for Microsoft accounts
-      host: (acc.provider === 'outlook') ? 'smtp.office365.com' : undefined,
-      port: (acc.provider === 'outlook') ? 587 : undefined,
-      secure: false, // TLS
-      service: (acc.provider !== 'outlook') ? acc.provider : undefined,
-      auth: authConfig,
+      host:    acc.provider === 'outlook' ? 'smtp.office365.com' : undefined,
+      port:    acc.provider === 'outlook' ? 587 : undefined,
+      secure:  false,
+      service: acc.provider !== 'outlook' ? acc.provider : undefined,
+      auth:    authConfig,
+      // FIX: Removed rejectUnauthorized:false (allowed MitM attacks) and
+      //      the broken SSLv3 cipher string.  TLS 1.2+ only.
       tls: {
-        ciphers: 'SSLv3',
-        rejectUnauthorized: false // Helps avoid handshake issues on some networks
-      }
+        minVersion:           'TLSv1.2',
+        rejectUnauthorized:   true, // Always validate the server's certificate
+      },
     });
 
-    // 4. Send the Mail
-    await transporter.sendMail({ 
-      from: acc.email, 
-      to, 
-      subject, 
-      html: body,
-      priority: priority || 'normal'
+    await transporter.sendMail({
+      from:     acc.email,
+      to,
+      subject,
+      html:     body,
+      priority: priority || 'normal',
     });
 
-    console.log(`Email sent successfully from ${acc.email}`);
+    console.log(`Email sent from ${acc.email}`);
     return true;
-  } catch (error) {
-    return { success: false, message: error.message }; // Works: Plain object
-    return false;
+
+  } catch (err) {
+    console.error('Send email error:', err.message);
+    return false; // FIX: Single return — removed unreachable duplicate
   }
 });
 
-// The compose window will call this immediately when it opens
-ipcMain.handle('get-compose-data', () => {
-  return currentComposeData;
-});
+ipcMain.handle('get-compose-data', () => currentComposeData);
 
-
-
-// --- UI / WINDOW CONTROLS ---
+// =============================================================================
+// UI / WINDOW CONTROLS
+// =============================================================================
 
 ipcMain.on('show-context-menu', (event, { id, name }) => {
-  if (!isTrustedSender(event.sender)) return; 
+  if (!isTrustedSender(event.sender)) return;
   const template = [
-    { 
-      label: 'Rename Inbox', 
+    {
+      label: 'Rename Inbox',
       click: () => {
-        const win = new BrowserWindow({ width: 450, height: 360, frame: false, transparent: true, webPreferences: { preload: path.join(__dirname, '../preload/preload.js'), contextIsolation: true } });
+        const win = new BrowserWindow({ width: 450, height: 360, frame: false, transparent: true, webPreferences: POPUP_WEB_PREFS });
         win.loadFile(path.join(__dirname, '../renderer/pages/rename.html'), { query: { id, name } });
-      }
+      },
     },
     { type: 'separator' },
-    { 
-      label: 'Delete Inbox', 
+    {
+      label: 'Delete Inbox',
       click: () => {
-        const win = new BrowserWindow({ width: 450, height: 360, frame: false, transparent: true, webPreferences: { preload: path.join(__dirname, '../preload/preload.js'), contextIsolation: true } });
+        const win = new BrowserWindow({ width: 450, height: 360, frame: false, transparent: true, webPreferences: POPUP_WEB_PREFS });
         win.loadFile(path.join(__dirname, '../renderer/pages/delete.html'), { query: { id, name } });
-      }
-    }
+      },
+    },
   ];
   Menu.buildFromTemplate(template).popup(BrowserWindow.fromWebContents(event.sender));
 });
 
-ipcMain.on('open-external', (event, url) => shell.openExternal(url));
-ipcMain.on('close-app', () => app.quit());
-ipcMain.on('minimize-app', () => mainWindow?.minimize());
-ipcMain.on('maximize-app', () => mainWindow?.isMaximized() ? mainWindow.unmaximize() : mainWindow?.maximize());
+// FIX: Validate that the URL uses http(s) before handing it to the OS.
+//      Without this, a crafted message could pass a file:// path or a
+//      custom protocol handler to shell.openExternal().
+ipcMain.on('open-external', (event, url) => {
+  if (!isTrustedSender(event.sender)) return;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      shell.openExternal(url);
+    } else {
+      console.warn('open-external: blocked non-http URL:', url);
+    }
+  } catch {
+    console.warn('open-external: blocked invalid URL:', url);
+  }
+});
+
+// FIX: isTrustedSender added to all window control handlers (was missing)
+ipcMain.on('close-app',    (event) => { if (!isTrustedSender(event.sender)) return; app.quit(); });
+ipcMain.on('minimize-app', (event) => { if (!isTrustedSender(event.sender)) return; mainWindow?.minimize(); });
+ipcMain.on('maximize-app', (event) => {
+  if (!isTrustedSender(event.sender)) return;
+  mainWindow?.isMaximized() ? mainWindow.unmaximize() : mainWindow?.maximize();
+});
 
 ipcMain.on('open-add-window', (event, isTutorial = false) => {
+  if (!isTrustedSender(event.sender)) return; // FIX: was missing
   const addWin = new BrowserWindow({
-    width: 450, height: 500, parent: mainWindow, modal: true, frame: false, transparent: true,
-    webPreferences: { preload: path.join(__dirname, '../preload/preload.js'), contextIsolation: true }
+    width: 450, height: 500, parent: mainWindow, modal: true,
+    frame: false, transparent: true,
+    webPreferences: POPUP_WEB_PREFS, // FIX: uses shared secure prefs (sandbox: true)
   });
-  addWin.loadFile(path.join(__dirname, '../renderer/pages/add.html'), { query: { tutorial: String(isTutorial) } });
+  addWin.loadFile(
+    path.join(__dirname, '../renderer/pages/add.html'),
+    { query: { tutorial: String(isTutorial) } }
+  );
 });
 
-
-
-// --- NEW: The Missing Engine Initializer ---
-async function initAccountEngine(accountId) {
-  try {
-    // 1. Declare 'acc' by fetching it from the database
-    const acc = db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId);
-    
-    if (!acc) {
-      console.error(`Account not found in database: ${accountId}`);
-      return;
-    }
-
-    let authPayload = {};
-    
-    // 2. Check for OAuth (Microsoft) vs Password (Gmail)
-    // We check for access_token because that's what we saved in the OAuth flow
-    if (acc.access_token) {
-      const token = await getValidAccessToken(accountId);
-      authPayload = { access_token: token };
-    } else if (acc.encrypted_token) {
-      // Use the older password-based method for Gmail/iCloud
-      const pass = safeStorage.decryptString(Buffer.from(acc.encrypted_token, 'base64'));
-      authPayload = { password: pass };
-    }
-
-    // 3. Initialize the IMAP Engine
-    const engine = new MailEngine({
-      ...acc,
-      ...authPayload,
-      host: (acc.provider === 'outlook' || acc.email.includes('hotmail')) 
-            ? 'outlook.office365.com' 
-            : (acc.provider === 'gmail' ? 'imap.gmail.com' : 'imap.mail.me.com'),
-      port: 993
-    });
-
-    // 4. Store in the active map so we can delete/send emails later
-    activeEngines.set(accountId, engine);
-
-    // 5. Connect and start syncing
-    await engine.client.connect();
-    console.log(`Successfully connected: ${acc.email}`);
-    
-    await engine.syncFolder('INBOX');
-    engine.startLiveListener(mainWindow);
-
-  } catch (err) {
-    // This is where your current error is being logged
-    console.error(`Failed to start engine for ${accountId}:`, err.message);
-  }
-}
-
-
-// --- APP LIFECYCLE & AUTO-UPDATER ---
-
-app.whenReady().then(() => {
-  initDB();
-  createWindow();
-
- mainWindow.webContents.on('did-finish-load', async () => {
-  try {
-    // 1. Get all saved accounts
-    const accounts = db.prepare('SELECT id, name, provider as type, email FROM accounts').all();
-    
-    // 2. Map them for the Sidebar UI
-    const formattedAccounts = accounts.map(account => ({
-      ...account,
-      icon: SERVICE_MAP[account.type]?.icon || 'mail'
-    }));
-    
-    // 3. Send to UI
-    mainWindow.webContents.send('init-accounts', formattedAccounts);
-
-    // 4. Start the backend engines
-    for (const account of accounts) {
-      // Pass only the ID; the function handles the rest
-      await initAccountEngine(account.id);
-    }
-    
-  } catch (err) {
-    console.error("Startup Sync Error:", err);
-  }
-});
-
-  // Keep the auto-updater alive!
-  autoUpdater.autoDownload = false;
-  autoUpdater.checkForUpdates();
-}); // Closes app.whenReady
-
-// Auto-Updater Listeners
-autoUpdater.on('update-available', (info) => showUpdateWindow('available', info.version));
-autoUpdater.on('update-downloaded', () => showUpdateWindow('downloaded'));
-
-function showUpdateWindow(state, version = '') {
-  const updateWin = new BrowserWindow({ width: 450, height: 360, parent: mainWindow, modal: true, frame: false, transparent: true });
-  updateWin.loadFile(path.join(__dirname, '../renderer/pages/update.html'), { query: { state, version } });
-}
-
+// FIX: isTrustedSender added; was missing
 ipcMain.on('update-response', (event, action) => {
+  if (!isTrustedSender(event.sender)) return;
   if (action === 'download') autoUpdater.downloadUpdate();
   else if (action === 'restart') autoUpdater.quitAndInstall();
 });
 
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+// =============================================================================
+// ACCOUNT ENGINE INITIALIZER
+// =============================================================================
+let mainWindow;
+const activeEngines = new Map();
+
+async function initAccountEngine(accountId) {
+  try {
+    const acc = db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId);
+    if (!acc) { console.error(`Account not found: ${accountId}`); return; }
+
+    let authPayload = {};
+    if (acc.access_token) {
+      // getValidAccessToken handles decryption + optional refresh
+      const token = await getValidAccessToken(accountId);
+      authPayload = { access_token: token };
+    } else if (acc.encrypted_token) {
+      const pass = safeStorage.decryptString(Buffer.from(acc.encrypted_token, 'base64'));
+      authPayload = { password: pass };
+    }
+
+    const engine = new MailEngine({
+      ...acc,
+      ...authPayload,
+      host: acc.provider === 'outlook' || acc.email.includes('hotmail')
+            ? 'outlook.office365.com'
+            : acc.provider === 'gmail'
+              ? 'imap.gmail.com'
+              : 'imap.mail.me.com',
+      port: 993,
+    });
+
+    activeEngines.set(accountId, engine);
+    await engine.client.connect();
+    console.log(`Connected: ${acc.email}`);
+    await engine.syncFolder('INBOX');
+    engine.startLiveListener(mainWindow);
+
+  } catch (err) {
+    console.error(`Failed to start engine for ${accountId}:`, err.message);
+  }
+}
+
+function createWindow() {
+  const state = windowStateKeeper({ defaultWidth: 1200, defaultHeight: 800 });
+  mainWindow = new BrowserWindow({
+    x: state.x, y: state.y,
+    width:  state.width,
+    height: state.height,
+    minWidth:  800,
+    minHeight: 600,
+    frame: false,
+    backgroundColor: '#1c1c1e',
+    icon: path.join(__dirname, '../assets/logo.ico'),
+    webPreferences: {
+      preload:          path.join(__dirname, '../preload/preload.js'),
+      contextIsolation: true,
+      sandbox:          true,
+      nodeIntegration:  false,
+    },
+  });
+
+  state.manage(mainWindow);
+  mainWindow.loadFile(path.join(__dirname, '../renderer/pages/index.html'));
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// =============================================================================
+// APP LIFECYCLE & AUTO-UPDATER
+// =============================================================================
+app.whenReady().then(() => {
+  initDB();
+  createWindow();
+
+  mainWindow.webContents.on('did-finish-load', async () => {
+    try {
+      const accounts = db
+        .prepare('SELECT id, name, provider as type, email FROM accounts')
+        .all();
+
+      const formattedAccounts = accounts.map(account => ({
+        ...account,
+        icon: SERVICE_MAP[account.type]?.icon || 'mail',
+      }));
+
+      mainWindow.webContents.send('init-accounts', formattedAccounts);
+
+      for (const account of accounts) {
+        await initAccountEngine(account.id);
+      }
+    } catch (err) {
+      console.error('Startup Sync Error:', err);
+    }
+  });
+
+  autoUpdater.autoDownload = false;
+  autoUpdater.checkForUpdates();
+});
+
+autoUpdater.on('update-available',  (info) => showUpdateWindow('available', info.version));
+autoUpdater.on('update-downloaded', ()     => showUpdateWindow('downloaded'));
+
+function showUpdateWindow(state, version = '') {
+  // FIX: Previously had no webPreferences at all — window.mailAPI would be
+  //      undefined so the buttons in update.html would silently fail.
+  const updateWin = new BrowserWindow({
+    width: 450, height: 360, parent: mainWindow, modal: true,
+    frame: false, transparent: true,
+    webPreferences: POPUP_WEB_PREFS, // FIX: includes preload + sandbox
+  });
+  updateWin.loadFile(
+    path.join(__dirname, '../renderer/pages/update.html'),
+    { query: { state, version } }
+  );
+}
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});

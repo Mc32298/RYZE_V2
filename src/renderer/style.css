@@ -475,6 +475,9 @@ a:link {
   overflow-y: auto;
   overflow-x: hidden; /* STRICT: Prevent the whole window from scrolling horizontally */
   padding: 40px 60px; 
+  
+  /* ADD THIS LINE: Traps rogue fixed-position elements inside the reader */
+  transform: translateZ(0); 
 }
 
 #reader-subject {
