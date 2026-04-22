@@ -7,6 +7,10 @@ class MailEngine {
   constructor(account) {
     this.account = account;
     
+    // --- NEW: Queue System State ---
+    this.actionQueue = [];
+    this.isProcessingQueue = false;
+    
     const authConfig = account.access_token 
       ? { user: account.email, accessToken: account.access_token } // OAuth Mode
       : { user: account.email, pass: account.password };           // Password Mode
@@ -20,12 +24,51 @@ class MailEngine {
     });
   }
 
-  async syncFolder(folderName = 'INBOX') {
-  // NEW: Safety check to prevent "Command failed" on an unready connection
-  if (!this.client.authenticated) {
-    console.log(`Postponing sync for ${this.account.email}: Not yet authenticated.`);
-    return;
+  // --- NEW: The Queue Processor ---
+  async processQueue() {
+    // If we are already chewing through the queue, don't start a duplicate loop
+    if (this.isProcessingQueue) return; 
+    this.isProcessingQueue = true;
+
+    while (this.actionQueue.length > 0) {
+      try {
+        // 1. SELF-HEALING: If the server kicked us, reconnect before trying the next action!
+        if (!this.client.usable) {
+          console.log(`Connection dropped for ${this.account.email}. Reconnecting...`);
+          await this.client.connect();
+        }
+
+        // 2. Peek at the first action (Notice we use [0] instead of .shift()!)
+        const action = this.actionQueue[0];
+        
+        // 3. Attempt the action
+        await action();
+
+        // 4. SUCCESS! Now we can safely remove it from the line
+        this.actionQueue.shift();
+        
+        // 5. Increased cooldown to 500ms to be even gentler on strict servers
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+      } catch (err) {
+        console.error("Queue action failed or dropped:", err.message);
+        
+        // FAILURE! The server is angry or disconnected. 
+        // We DO NOT shift() the array, meaning this exact email will be retried.
+        // Wait 2 full seconds to let the server cool down before the loop restarts.
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+
+    // Queue is empty, go back to sleep
+    this.isProcessingQueue = false;
   }
+
+  async syncFolder(folderName = 'INBOX') {
+    if (!this.client.authenticated) {
+      console.log(`Postponing sync for ${this.account.email}: Not yet authenticated.`);
+      return;
+    }
     
     let lock = await this.client.getMailboxLock(folderName);
     try {
@@ -36,7 +79,6 @@ class MailEngine {
 
         for await (let message of messages) {
           const parsed = await simpleParser(message.source);
-          // Pass message.flags as a new 4th argument
           this.saveEmailToDb(message.uid, parsed, folderName, message.flags); 
         }
       }
@@ -46,8 +88,6 @@ class MailEngine {
   }
 
   async startLiveListener(mainWindow) {
-    // REMOVED: The connect check here as well
-    
     this.client.on('exists', async (data) => {
       console.log(`New mail detected! Total: ${data.count}`);
       let lock = await this.client.getMailboxLock('INBOX');
@@ -72,7 +112,6 @@ class MailEngine {
   }
 
   getTrashFolderName() {
-    // The account object has `provider` from DB or `type` from initial creation
     const provider = this.account.provider || this.account.type;
     switch (provider) {
       case 'gmail':
@@ -82,41 +121,48 @@ class MailEngine {
       case 'icloud':
         return 'Deleted Messages';
       default:
-        return 'Trash'; // A common default that works for many others
+        return 'Trash'; 
     }
   }
 
-  async deleteEmailOnServer(uid, folder = 'INBOX') {
-    if (!this.client.authenticated) return;
-    try {
+  // --- UPGRADED: Propagates connection errors so the queue can retry ---
+  deleteEmailOnServer(uid, folder = 'INBOX') {
+    const deleteAction = async () => {
       const trashFolder = this.getTrashFolderName();
-
-      // Ensure we are operating on the correct folder before moving
+      
+      // If the connection is dead, this will immediately throw an error up to the queue
       let lock = await this.client.getMailboxLock(folder);
+      
       try {
-        // Use messageMove to move the email to the trash folder
         await this.client.messageMove(uid, trashFolder, { uid: true });
         console.log(`Moved email UID ${uid} from '${folder}' to '${trashFolder}'.`);
       } catch (moveErr) {
-        // The ultimate safety net: If trash folder is missing, force the deletion flag
+        // CRITICAL: If it's a network drop, THROW it so the queue knows to pause and retry!
+        if (moveErr.message.includes('Connection') || !this.client.usable) {
+          throw moveErr; 
+        }
+        
+        // If it's just a missing folder error, use the fallback flag
         console.log(`Trash folder missing, falling back to IMAP \\Deleted flag.`);
         await this.client.messageFlagsAdd(uid, ['\\Deleted'], { uid: true });
       } finally {
-        lock.release();
+        lock.release(); // Always release the folder lock!
       }
-    } catch (err) {
-      console.error(`Failed to delete email UID ${uid}:`, err.message);
-    }
+    };
+
+    // Add it to the back of the line
+    this.actionQueue.push(deleteAction);
+    
+    // Kick off the processor
+    this.processQueue();
   }
 
-    saveEmailToDb(uid, parsedEmail, folder, flags = []) {
+  saveEmailToDb(uid, parsedEmail, folder, flags = []) {
     const checkStmt = db.prepare('SELECT id FROM emails WHERE account_id = ? AND uid = ? AND folder = ?');
     if (checkStmt.get(this.account.id, uid, folder)) return;
 
-    // Check standard headers (Outlook/iCloud) OR Gmail's internal flag
     let emailPriority = parsedEmail.priority || 'normal';
     
-    // If the server tells us it has the "Important" flag, force the UI to show it
     if (flags.includes('\\Important') || flags.includes('Important')) {
       emailPriority = 'high';
     }

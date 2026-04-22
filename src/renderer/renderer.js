@@ -11,6 +11,7 @@
 let currentOpenEmail = null;
 let isImportant      = false;
 let isTutorialActive = false;
+let pendingSelectEmailId = null;
 
 const sidebar = document.querySelector('.sidebar');
 const addBtn  = document.getElementById('btn-add');
@@ -230,9 +231,21 @@ document.getElementById('btn-feedback')?.addEventListener('click', () => {
 document.getElementById('btn-delete-email')?.addEventListener('click', async (e) => {
   if (!currentOpenEmail) return;
 
+  // Determine the next email to select before we delete the current one
+  const inboxItems = Array.from(document.querySelectorAll('.email-item'));
+  const currentIndex = inboxItems.findIndex(item => item.dataset.emailId === currentOpenEmail.id);
+  if (currentIndex !== -1) {
+    const nextItem = inboxItems[currentIndex + 1] || inboxItems[currentIndex - 1];
+    if (nextItem) {
+      pendingSelectEmailId = nextItem.dataset.emailId;
+    }
+  }
+
   const btn = e.currentTarget;
   btn.style.opacity       = '0.5';
   btn.style.pointerEvents = 'none';
+
+  const accountId = currentOpenEmail.account_id;
 
   const success = await window.mailAPI.deleteEmail({
     id:         currentOpenEmail.id,
@@ -242,24 +255,12 @@ document.getElementById('btn-delete-email')?.addEventListener('click', async (e)
   });
 
   if (success) {
-    const subjectEl = document.getElementById('reader-subject');
-    if (subjectEl) subjectEl.textContent = 'Select an email';
-
-    const senderEl = document.getElementById('reader-sender');
-    if (senderEl) senderEl.textContent = '---';
-
-    const reader = document.getElementById('reader-body');
-    if (reader) {
-      if (reader.shadowRoot) reader.shadowRoot.innerHTML = '';
-      reader.innerHTML = '';
-    }
-
     btn.style.display       = 'none';
     btn.style.opacity       = '1';
     btn.style.pointerEvents = 'auto';
 
-    loadInbox(currentOpenEmail.account_id);
     currentOpenEmail = null;
+    loadInbox(accountId);
   } else {
     btn.style.opacity       = '1';
     btn.style.pointerEvents = 'auto';
@@ -479,6 +480,7 @@ async function loadInbox(accountId) {
   emails.forEach(email => {
     const el = document.createElement('div');
     el.className = 'email-item';
+    el.dataset.emailId = email.id;
 
     const safeSender = email.sender || 'Unknown';
     const senderName = safeSender.split('<')[0].trim() || 'Unknown Sender';
@@ -508,9 +510,53 @@ async function loadInbox(accountId) {
     snippetEl.className   = 'email-snippet';
     snippetEl.textContent = email.snippet || ''; // FIX: textContent
 
+    // ── Inline Delete Button ──
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'inline-delete-btn';
+    deleteBtn.title = 'Delete';
+    const delIcon = document.createElement('span');
+    delIcon.className = 'material-symbols-outlined';
+    delIcon.textContent = 'delete';
+    deleteBtn.appendChild(delIcon);
+
+    deleteBtn.onclick = async (e) => {
+      e.stopPropagation(); // Prevents opening the email when you just want to delete it
+      deleteBtn.style.opacity = '0.5';
+      deleteBtn.style.pointerEvents = 'none';
+
+      // If the email we are deleting is currently open, figure out the next one to select
+      if (currentOpenEmail && currentOpenEmail.id === email.id) {
+        const currentIndex = emails.findIndex(e => e.id === email.id);
+        if (currentIndex !== -1) {
+          const nextEmail = emails[currentIndex + 1] || emails[currentIndex - 1];
+          if (nextEmail) {
+            pendingSelectEmailId = nextEmail.id;
+          }
+        }
+      }
+
+      const success = await window.mailAPI.deleteEmail({
+        id:         email.id,
+        account_id: email.account_id,
+        uid:        email.uid,
+        folder:     email.folder,
+      });
+
+      if (success) {
+        if (currentOpenEmail && currentOpenEmail.id === email.id) {
+          currentOpenEmail = null;
+        }
+        loadInbox(email.account_id);
+      } else {
+        deleteBtn.style.opacity = '1';
+        deleteBtn.style.pointerEvents = 'auto';
+      }
+    };
+
     el.appendChild(senderEl);
     el.appendChild(subjectEl);
     el.appendChild(snippetEl);
+    el.appendChild(deleteBtn);
 
     // ── Click handler — open email in reader pane ──
     el.onclick = () => {
@@ -578,6 +624,41 @@ async function loadInbox(accountId) {
 
     inboxContainer.appendChild(el);
   });
+
+  // ── Auto-Select Logic ──
+  if (emails.length > 0) {
+    let targetEl = null;
+
+    if (pendingSelectEmailId) {
+      targetEl = inboxContainer.querySelector(`[data-email-id="${pendingSelectEmailId}"]`);
+      pendingSelectEmailId = null;
+    }
+
+    if (!targetEl && currentOpenEmail) {
+      targetEl = inboxContainer.querySelector(`[data-email-id="${currentOpenEmail.id}"]`);
+    }
+
+    if (!targetEl) {
+      targetEl = inboxContainer.querySelector('.email-item'); // Default to the first (newest) email
+    }
+
+    if (targetEl && !targetEl.classList.contains('active')) {
+      targetEl.click();
+    }
+  } else {
+    // No emails left, clear the reader pane
+    const subjectEl = document.getElementById('reader-subject');
+    if (subjectEl) subjectEl.textContent = 'Select an email';
+    const senderEl = document.getElementById('reader-sender');
+    if (senderEl) senderEl.textContent = '---';
+    const reader = document.getElementById('reader-body');
+    if (reader) {
+      if (reader.shadowRoot) reader.shadowRoot.innerHTML = '';
+      reader.innerHTML = '';
+    }
+    const topDelBtn = document.getElementById('btn-delete-email');
+    if (topDelBtn) topDelBtn.style.display = 'none';
+  }
 }
 
 // =============================================================================

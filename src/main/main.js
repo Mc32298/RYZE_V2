@@ -332,10 +332,18 @@ ipcMain.handle('get-emails', async (event, accountId) => {
 
 ipcMain.handle('delete-email', async (event, { id, account_id, uid, folder }) => {
   if (!isTrustedSender(event.sender)) return false;
+  
   try {
+    // 1. Delete from local SQLite Database instantly
     db.prepare('DELETE FROM emails WHERE id = ?').run(id);
+
+    // 2. Tell the specific IMAP engine to delete it from the cloud IN THE BACKGROUND
     const engine = activeEngines.get(account_id);
-    if (engine) engine.deleteEmailOnServer(uid, folder).catch(console.error);
+    if (engine) {
+      // FIX: Just call the function. Do not attach .catch() because it's no longer a Promise!
+      engine.deleteEmailOnServer(uid, folder);
+    }
+
     return true;
   } catch (err) {
     console.error('Delete error:', err);
