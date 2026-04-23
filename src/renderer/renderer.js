@@ -12,6 +12,7 @@ let currentOpenEmail = null;
 let isImportant      = false;
 let isTutorialActive = false;
 let pendingSelectEmailId = null;
+let currentFolder = 'INBOX';
 
 const sidebar = document.querySelector('.sidebar');
 const addBtn  = document.getElementById('btn-add');
@@ -122,6 +123,10 @@ function createSidebarButton(acc) {
     document.querySelectorAll('.sidebar button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
 
+    // Reset folder view back to INBOX when switching accounts
+    currentFolder = 'INBOX';
+    document.querySelector('.list-header').textContent = 'Inbox';
+
     const calHeader = document.getElementById('calendar-account-name');
     if (calHeader) calHeader.textContent = `${acc.name}'s Calendar`; // FIX: textContent
 
@@ -135,8 +140,8 @@ function createSidebarButton(acc) {
       placeholder.textContent = `Events for ${acc.email} will sync here.`; // FIX: textContent
       calContent.appendChild(placeholder);
     }
-
-    loadInbox(acc.id);
+    loadFolders(acc.id);
+    loadInbox(acc.id, 'INBOX');
   });
 
   btn.addEventListener('contextmenu', (e) => {
@@ -146,6 +151,70 @@ function createSidebarButton(acc) {
 
   sidebar?.insertBefore(btn, addBtn);
   return btn;
+}
+
+// Add a 'retries' parameter so it can try again if the server is still connecting
+// =============================================================================
+// FOLDER LOADER
+// =============================================================================
+
+async function loadFolders(accountId, retries = 5) {
+  const folderList = document.getElementById('folder-list');
+  if (!folderList) return;
+  
+  // Only show the loading text on the very first attempt
+  if (retries === 5) {
+    folderList.innerHTML = '<p style="color: #666; font-size: 13px; padding: 0 20px;">Connecting to server...</p>';
+  }
+  
+  const folders = await window.mailAPI.getFolders(accountId);
+  
+  // If the IMAP client is still authenticating, wait 2 seconds and try again
+  if (folders.length === 0 && retries > 0) {
+    setTimeout(() => loadFolders(accountId, retries - 1), 2000);
+    return;
+  }
+  
+  folderList.innerHTML = '';
+  
+  folders.forEach(f => {
+    const el = document.createElement('div');
+    el.className = 'folder-item';
+    if (f.path === currentFolder) el.classList.add('active');
+    
+    // Assign generic icons based on folder names
+    let iconName = 'folder';
+    const lowerName = f.name.toLowerCase();
+    if (lowerName.includes('inbox')) iconName = 'inbox';
+    if (lowerName.includes('sent')) iconName = 'send';
+    if (lowerName.includes('draft')) iconName = 'drafts';
+    if (lowerName.includes('trash') || lowerName.includes('delete')) iconName = 'delete';
+    if (lowerName.includes('spam') || lowerName.includes('junk')) iconName = 'report';
+    if (lowerName.includes('archive')) iconName = 'archive';
+    
+    el.innerHTML = `<span class="material-symbols-outlined folder-icon">${iconName}</span> <span>${f.name}</span>`;
+    
+    el.onclick = () => {
+      document.querySelectorAll('.folder-item').forEach(item => item.classList.remove('active'));
+      el.classList.add('active');
+      currentFolder = f.path;
+      
+      document.querySelector('.list-header').textContent = f.name;
+      
+      // 1. Initial load: NOT silent (will show "Loading emails...")
+      loadInbox(accountId, f.path);
+      
+      // 2. Trigger background sync
+      window.mailAPI.syncFolder({ accountId, folder: f.path }).then(() => {
+        if (currentFolder === f.path) {
+          // 3. Background sync finished! Reload, but pass TRUE to make it silent!
+          loadInbox(accountId, f.path, true);
+        }
+      });
+    };
+    
+    folderList.appendChild(el);
+  });
 }
 
 // =============================================================================
@@ -212,7 +281,7 @@ window.mailAPI?.onAccountUpdated(({ id, newName }) => {
 window.mailAPI?.onNewMailArrived((accountId) => {
   const activeBtn = document.querySelector('.mail-btn.active');
   if (activeBtn && activeBtn.id === accountId) {
-    loadInbox(accountId);
+    loadInbox(accountId, currentFolder);
   }
 });
 
@@ -260,7 +329,7 @@ document.getElementById('btn-delete-email')?.addEventListener('click', async (e)
     btn.style.pointerEvents = 'auto';
 
     currentOpenEmail = null;
-    loadInbox(accountId);
+    loadInbox(accountId, currentFolder);
   } else {
     btn.style.opacity       = '1';
     btn.style.pointerEvents = 'auto';
@@ -455,22 +524,23 @@ document.getElementById('pill-btn-send')?.addEventListener('click', async () => 
 // INBOX LOADER
 // =============================================================================
 
-async function loadInbox(accountId) {
+async function loadInbox(accountId, folder = 'INBOX', silentRefresh = false) {
   const inboxContainer = document.getElementById('inbox-items');
   if (!inboxContainer) return;
 
-  // Safe — this is our own static string
-  inboxContainer.innerHTML = '<p style="color: #666; font-size: 14px; padding: 0 20px;">Syncing database...</p>';
+  // Only show "Loading emails..." if it's a completely new folder click
+  if (!silentRefresh) {
+    inboxContainer.innerHTML = '<p style="color: #666; font-size: 14px; padding: 0 20px;">Loading emails...</p>';
+  }
 
-  const emails = await window.mailAPI.getEmails(accountId);
+  const emails = await window.mailAPI.getEmails({ accountId, folder });
 
   if (emails.length === 0) {
-    // Safe — this is our own static string with no user data
     inboxContainer.innerHTML = `
       <div class="inbox-empty-state">
         <span class="material-symbols-outlined">inbox</span>
         <h3>Inbox is Empty</h3>
-        <p>New emails will appear here.</p>
+        <p>No emails found.</p>
       </div>`;
     return;
   }

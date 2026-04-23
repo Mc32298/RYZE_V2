@@ -24,6 +24,19 @@ class MailEngine {
     });
   }
 
+  // Add this inside the MailEngine class
+  async getFolders() {
+    if (!this.client.authenticated) return [];
+    try {
+      const folders = await this.client.list();
+      // Returns an array with the short 'name' (e.g., "Sent") and the full 'path' (e.g., "[Gmail]/Sent Mail")
+      return folders.map(f => ({ name: f.name, path: f.path }));
+    } catch (err) {
+      console.error("Failed to fetch folders:", err);
+      return [];
+    }
+  }
+
   // --- NEW: The Queue Processor ---
   async processQueue() {
     // If we are already chewing through the queue, don't start a duplicate loop

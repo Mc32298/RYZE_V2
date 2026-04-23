@@ -317,17 +317,32 @@ async function getValidAccessToken(accountId) {
 // EMAIL IPC HANDLERS
 // =============================================================================
 
-ipcMain.handle('get-emails', async (event, accountId) => {
+ipcMain.handle('get-emails', async (event, { accountId, folder = 'INBOX' }) => {
   if (!isTrustedSender(event.sender)) return [];
   try {
     return db
-      .prepare('SELECT * FROM emails WHERE account_id = ? ORDER BY date DESC')
-      .all(accountId)
+      .prepare('SELECT * FROM emails WHERE account_id = ? AND folder = ? ORDER BY date DESC')
+      .all(accountId, folder)
       .map(row => ({ ...row }));
   } catch (err) {
     console.error('Failed to fetch emails:', err);
     return [];
   }
+});
+
+// NEW: Fetch folders for an account
+ipcMain.handle('get-folders', async (event, accountId) => {
+  if (!isTrustedSender(event.sender)) return [];
+  const engine = activeEngines.get(accountId);
+  if (!engine) return [];
+  return await engine.getFolders();
+});
+
+// NEW: Sync a specific folder on demand
+ipcMain.handle('sync-folder', async (event, { accountId, folder }) => {
+  if (!isTrustedSender(event.sender)) return;
+  const engine = activeEngines.get(accountId);
+  if (engine) await engine.syncFolder(folder);
 });
 
 ipcMain.handle('delete-email', async (event, { id, account_id, uid, folder }) => {

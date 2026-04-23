@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld('mailAPI', {
   deleteEmail: (data) => ipcRenderer.invoke('delete-email', data),
   startOAuth: (provider) => ipcRenderer.send('start-oauth', provider),
   replyUpdate: (action) => ipcRenderer.send('update-response', action), // ADD THIS (for update.html)
+  getEmails: (data) => ipcRenderer.invoke('get-emails', data),
+    
+    // Add these two lines:
+  getFolders: (accountId) => ipcRenderer.invoke('get-folders', accountId),
+  syncFolder: (data) => ipcRenderer.invoke('sync-folder', data),
 
   // Window Controls
   closeApp: () => ipcRenderer.send('close-app'),
