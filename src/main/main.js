@@ -344,6 +344,14 @@ ipcMain.handle('sync-folder', async (event, { accountId, folder }) => {
   const engine = activeEngines.get(accountId);
   if (engine) await engine.syncFolder(folder);
 });
+// NEW: Create a new folder on the server
+ipcMain.handle('create-folder', async (event, { accountId, folderName }) => {
+  if (!isTrustedSender(event.sender)) return false;
+  const engine = activeEngines.get(accountId);
+  if (!engine) return false;
+  
+  return await engine.createFolder(folderName);
+});
 
 ipcMain.handle('delete-email', async (event, { id, account_id, uid, folder }) => {
   if (!isTrustedSender(event.sender)) return false;

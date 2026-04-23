@@ -23,7 +23,19 @@ class MailEngine {
       logger: false
     });
   }
-
+// Add this inside the MailEngine class
+  async createFolder(folderPath) {
+    if (!this.client.authenticated) return false;
+    try {
+      // Sends the IMAP CREATE command to the server
+      await this.client.mailboxCreate(folderPath);
+      console.log(`Successfully created folder: ${folderPath}`);
+      return true;
+    } catch (err) {
+      console.error(`Failed to create folder ${folderPath}:`, err.message);
+      return false;
+    }
+  }
   // Add this inside the MailEngine class
   async getFolders() {
     if (!this.client.authenticated) return [];

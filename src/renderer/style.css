@@ -858,6 +858,8 @@ a:link {
   align-items: center;
   gap: 10px;
   transition: all 0.2s ease;
+  user-select: none;
+  border: 2px solid transparent; /* Prevents layout shifting during drag */
 }
 
 .folder-item:hover {
@@ -872,4 +874,72 @@ a:link {
 .folder-icon {
   font-size: 18px !important;
   opacity: 0.8;
+}
+
+
+/* When the item is actively being dragged */
+.folder-item.dragging {
+  opacity: 0.4;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Hovering middle: Animation for nesting (Sub-folder) */
+.folder-item.drag-over-nest {
+  background: rgba(10, 132, 255, 0.15);
+  border: 2px dashed var(--accent-color);
+  transform: scale(1.02);
+  z-index: 10;
+}
+
+/* Hovering top: Sorting above */
+.folder-item.drag-over-top {
+  border-top: 2px solid var(--accent-color);
+}
+
+/* Hovering bottom: Sorting below */
+.folder-item.drag-over-bottom {
+  border-bottom: 2px solid var(--accent-color);
+}
+
+/* Visual indentation for sub-folders */
+.folder-item.sub-folder {
+  margin-left: 25px;
+  width: calc(100% - 45px);
+  position: relative;
+}
+
+/* A little elbow line to connect sub-folders visually */
+.folder-item.sub-folder::before {
+  content: "";
+  position: absolute;
+  left: -15px;
+  top: 50%;
+  width: 10px;
+  height: 1px;
+  background-color: var(--text-secondary);
+  opacity: 0.5;
+}
+
+/* --- Folder Collapse/Expand --- */
+.folder-toggle {
+  margin-left: auto; /* Pushes the icon to the far right */
+  font-size: 20px !important;
+  color: var(--text-secondary);
+  transition: transform 0.2s ease;
+  padding: 2px;
+  border-radius: 4px;
+}
+
+.folder-toggle:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.folder-toggle.collapsed {
+  transform: rotate(-90deg); /* Points right instead of down */
+}
+
+/* Class applied by JavaScript to hide elements */
+.hidden-sub-folder {
+  display: none !important;
 }

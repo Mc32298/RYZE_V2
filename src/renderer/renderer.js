@@ -153,23 +153,72 @@ function createSidebarButton(acc) {
   return btn;
 }
 
-// Add a 'retries' parameter so it can try again if the server is still connecting
+
 // =============================================================================
-// FOLDER LOADER
+// FOLDER LOADER & DRAG LOGIC
 // =============================================================================
+
+let draggedFolderEl = null;
+
+// Helper function to dynamically add/remove expand arrows
+function refreshFolderStructure() {
+  const items = Array.from(document.querySelectorAll('.folder-item'));
+  
+  items.forEach((item, index) => {
+    const nextItem = items[index + 1];
+    // It's a parent if the NEXT item is a sub-folder, and THIS item is NOT
+    const isParent = nextItem && nextItem.classList.contains('sub-folder') && !item.classList.contains('sub-folder');
+    
+    let toggle = item.querySelector('.folder-toggle');
+
+    if (isParent) {
+      if (!toggle) {
+        toggle = document.createElement('span');
+        toggle.className = 'material-symbols-outlined folder-toggle';
+        toggle.textContent = 'expand_more'; // Down arrow
+        
+        toggle.onclick = (e) => {
+          e.stopPropagation(); // Crucial: Stop the click from selecting the folder!
+          toggle.classList.toggle('collapsed');
+          const isCollapsed = toggle.classList.contains('collapsed');
+          
+          // Find all sub-folders immediately following this item and toggle them
+          let sibling = item.nextElementSibling;
+          while (sibling && sibling.classList.contains('sub-folder')) {
+            if (isCollapsed) {
+              sibling.classList.add('hidden-sub-folder');
+            } else {
+              sibling.classList.remove('hidden-sub-folder');
+            }
+            sibling = sibling.nextElementSibling;
+          }
+        };
+        item.appendChild(toggle);
+      }
+    } else {
+      // If it no longer has children (e.g. they were dragged away), remove the arrow
+      if (toggle) toggle.remove(); 
+    }
+  });
+}
 
 async function loadFolders(accountId, retries = 5) {
   const folderList = document.getElementById('folder-list');
   if (!folderList) return;
   
-  // Only show the loading text on the very first attempt
   if (retries === 5) {
     folderList.innerHTML = '<p style="color: #666; font-size: 13px; padding: 0 20px;">Connecting to server...</p>';
   }
+
+  // Safe way to show buttons without crashing if they don't exist yet
+  const btnNew = document.getElementById('btn-new-folder');
+  if (btnNew) btnNew.style.display = 'block';
+
+  const btnDel = document.getElementById('btn-delete-folder');
+  if (btnDel) btnDel.style.display = 'block';
   
   const folders = await window.mailAPI.getFolders(accountId);
   
-  // If the IMAP client is still authenticating, wait 2 seconds and try again
   if (folders.length === 0 && retries > 0) {
     setTimeout(() => loadFolders(accountId, retries - 1), 2000);
     return;
@@ -181,18 +230,99 @@ async function loadFolders(accountId, retries = 5) {
     const el = document.createElement('div');
     el.className = 'folder-item';
     if (f.path === currentFolder) el.classList.add('active');
+
+    // --- Auto-detect subfolders from the IMAP Server ---
+    if (f.path.includes('/') || f.path.includes('.')) {
+      el.classList.add('sub-folder');
+    }
     
-    // Assign generic icons based on folder names
+    // --- DRAG AND DROP LOGIC ---
+    el.draggable = true;
+
+    el.addEventListener('dragstart', (e) => {
+      draggedFolderEl = el;
+      setTimeout(() => el.classList.add('dragging'), 0);
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', f.path);
+    });
+
+    el.addEventListener('dragend', () => {
+      if (draggedFolderEl) draggedFolderEl.classList.remove('dragging');
+      draggedFolderEl = null;
+      document.querySelectorAll('.folder-item').forEach(item => {
+        item.classList.remove('drag-over-nest', 'drag-over-top', 'drag-over-bottom');
+      });
+    });
+
+    el.addEventListener('dragover', (e) => {
+      e.preventDefault(); 
+      if (!draggedFolderEl || draggedFolderEl === el) return;
+
+      const bounding = el.getBoundingClientRect();
+      const offset = e.clientY - bounding.top;
+      const height = bounding.height;
+
+      el.classList.remove('drag-over-nest', 'drag-over-top', 'drag-over-bottom');
+
+      if (offset < height * 0.25) {
+        el.classList.add('drag-over-top');
+      } else if (offset > height * 0.75) {
+        el.classList.add('drag-over-bottom');
+      } else {
+        el.classList.add('drag-over-nest'); 
+      }
+    });
+
+    el.addEventListener('dragleave', () => {
+      el.classList.remove('drag-over-nest', 'drag-over-top', 'drag-over-bottom');
+    });
+
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (!draggedFolderEl || draggedFolderEl === el) return;
+
+      el.classList.remove('drag-over-nest', 'drag-over-top', 'drag-over-bottom');
+
+      const bounding = el.getBoundingClientRect();
+      const offset = e.clientY - bounding.top;
+      const height = bounding.height;
+
+      if (offset < height * 0.25) {
+        // Sort Above
+        el.parentNode.insertBefore(draggedFolderEl, el);
+        draggedFolderEl.classList.remove('sub-folder', 'hidden-sub-folder');
+      } else if (offset > height * 0.75) {
+        // Sort Below
+        el.parentNode.insertBefore(draggedFolderEl, el.nextSibling);
+        draggedFolderEl.classList.remove('sub-folder', 'hidden-sub-folder');
+      } else {
+        // Nest inside
+        el.parentNode.insertBefore(draggedFolderEl, el.nextSibling);
+        draggedFolderEl.classList.add('sub-folder');
+        draggedFolderEl.classList.remove('hidden-sub-folder'); 
+        
+        // Auto-expand the folder we just dropped into if it was collapsed
+        const toggle = el.querySelector('.folder-toggle');
+        if (toggle && toggle.classList.contains('collapsed')) {
+          toggle.click(); 
+        }
+      }
+      
+      refreshFolderStructure();
+    });
+
+    // --- ICONS & CLICKS ---
     let iconName = 'folder';
     const lowerName = f.name.toLowerCase();
     if (lowerName.includes('inbox')) iconName = 'inbox';
-    if (lowerName.includes('sent')) iconName = 'send';
-    if (lowerName.includes('draft')) iconName = 'drafts';
-    if (lowerName.includes('trash') || lowerName.includes('delete')) iconName = 'delete';
-    if (lowerName.includes('spam') || lowerName.includes('junk')) iconName = 'report';
-    if (lowerName.includes('archive')) iconName = 'archive';
+    else if (lowerName.includes('sent')) iconName = 'send';
+    else if (lowerName.includes('draft')) iconName = 'drafts';
+    else if (lowerName.includes('trash') || lowerName.includes('delete')) iconName = 'delete';
+    else if (lowerName.includes('spam') || lowerName.includes('junk')) iconName = 'report';
+    else if (lowerName.includes('archive')) iconName = 'archive';
     
-    el.innerHTML = `<span class="material-symbols-outlined folder-icon">${iconName}</span> <span>${f.name}</span>`;
+    // I also added text-overflow protection here so long folder names don't break the layout!
+    el.innerHTML = `<span class="material-symbols-outlined folder-icon">${iconName}</span> <span style="flex-grow: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${f.name}</span>`;
     
     el.onclick = () => {
       document.querySelectorAll('.folder-item').forEach(item => item.classList.remove('active'));
@@ -201,13 +331,9 @@ async function loadFolders(accountId, retries = 5) {
       
       document.querySelector('.list-header').textContent = f.name;
       
-      // 1. Initial load: NOT silent (will show "Loading emails...")
       loadInbox(accountId, f.path);
-      
-      // 2. Trigger background sync
       window.mailAPI.syncFolder({ accountId, folder: f.path }).then(() => {
         if (currentFolder === f.path) {
-          // 3. Background sync finished! Reload, but pass TRUE to make it silent!
           loadInbox(accountId, f.path, true);
         }
       });
@@ -215,6 +341,9 @@ async function loadFolders(accountId, retries = 5) {
     
     folderList.appendChild(el);
   });
+
+  // Calculate initial arrows after rendering the list
+  refreshFolderStructure();
 }
 
 // =============================================================================
@@ -737,3 +866,69 @@ async function loadInbox(accountId, folder = 'INBOX', silentRefresh = false) {
 document.querySelector('.light.close')?.addEventListener('click',    () => window.mailAPI.closeApp());
 document.querySelector('.light.minimize')?.addEventListener('click', () => window.mailAPI.minimizeApp());
 document.querySelector('.light.maximize')?.addEventListener('click', () => window.mailAPI.maximizeApp());
+
+// =============================================================================
+// NEW FOLDER INLINE CREATION
+// =============================================================================
+
+document.getElementById('btn-new-folder')?.addEventListener('click', () => {
+  const activeBtn = document.querySelector('.sidebar button.active');
+  if (!activeBtn) return;
+  const accountId = activeBtn.id;
+
+  const folderList = document.getElementById('folder-list');
+  
+  // Prevent spam-clicking the button by checking if an input already exists
+  if (document.getElementById('new-folder-input')) return;
+
+  // Create the inline input row
+  const inputContainer = document.createElement('div');
+  inputContainer.className = 'folder-item';
+  inputContainer.style.display = 'flex'; 
+  inputContainer.style.alignItems = 'center';
+  inputContainer.style.gap = '10px';
+
+  inputContainer.innerHTML = `
+    <span class="material-symbols-outlined folder-icon">folder</span> 
+    <input type="text" id="new-folder-input" placeholder="Folder Name..." 
+           style="background: transparent; border: none; color: white; outline: none; flex-grow: 1; font-size: 14px; font-family: inherit;">
+  `;
+
+  // Insert it right at the top of the list
+  folderList.insertBefore(inputContainer, folderList.firstChild);
+  
+  const inputField = document.getElementById('new-folder-input');
+  inputField.focus();
+
+  // Handle saving when pressing Enter, or canceling on Escape
+  inputField.addEventListener('keydown', async (e) => {
+    if (e.key === 'Enter') {
+      const folderName = inputField.value.trim();
+      
+      if (folderName) {
+        inputField.disabled = true; // Lock the input
+        inputContainer.style.opacity = '0.5'; // Visual cue that it's saving
+        
+        // 1. Tell the server to create it
+        const success = await window.mailAPI.createFolder({ accountId, folderName });
+        
+        if (success) {
+          // 2. Reload the folder list to show it cleanly from the server!
+          loadFolders(accountId);
+        } else {
+          alert("Failed to create folder. It might already exist or contain invalid characters.");
+          inputContainer.remove();
+        }
+      } else {
+        inputContainer.remove(); // Empty name, just cancel
+      }
+    } else if (e.key === 'Escape') {
+      inputContainer.remove(); // Cancel on escape
+    }
+  });
+
+  // Cancel if they click away from the input box
+  inputField.addEventListener('blur', () => {
+     if (!inputField.disabled) inputContainer.remove();
+  });
+});
